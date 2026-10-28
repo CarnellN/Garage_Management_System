@@ -13,16 +13,29 @@ export function loadConfig(env = process.env) {
   if (!['development', 'test', 'production'].includes(nodeEnv)) {
     throw new Error('NODE_ENV must be development, test, or production.');
   }
+  const driver = env.DB_CLIENT ?? 'postgres';
+  if (!['postgres', 'mysql'].includes(driver)) throw new Error('DB_CLIENT must be postgres or mysql.');
   let databaseUrl;
   try {
     databaseUrl = new URL(env.DATABASE_URL);
   } catch {
-    throw new Error('DATABASE_URL must be a valid PostgreSQL connection URI.');
+    throw new Error('DATABASE_URL must be a valid database connection URI.');
   }
-  if (!['postgres:', 'postgresql:'].includes(databaseUrl.protocol) ||
+  const protocols = driver === 'postgres' ? ['postgres:', 'postgresql:'] : ['mysql:'];
+  if (!protocols.includes(databaseUrl.protocol) ||
       !databaseUrl.hostname || databaseUrl.pathname.length < 2 ||
       !databaseUrl.username || !databaseUrl.password) {
-    throw new Error('DATABASE_URL must include a PostgreSQL host, database, username, and password.');
+    throw new Error('DATABASE_URL must match DB_CLIENT and include a host, database, username, and password.');
+  }
+  if (driver === 'mysql' && (databaseUrl.search || databaseUrl.hash)) {
+    throw new Error('MySQL DATABASE_URL must not contain query parameters or fragments.');
+  }
+  try {
+    decodeURIComponent(databaseUrl.username);
+    decodeURIComponent(databaseUrl.password);
+    decodeURIComponent(databaseUrl.pathname.slice(1));
+  } catch {
+    throw new Error('DATABASE_URL contains invalid percent-encoding.');
   }
   // pg connection-string SSL options can override the explicit verified TLS config.
   if ([...databaseUrl.searchParams.keys()].some((key) => key.toLowerCase().startsWith('ssl'))) {
@@ -63,6 +76,7 @@ export function loadConfig(env = process.env) {
     port: boundedInteger(env.PORT, 8000, 'PORT', 1, 65535),
     corsOrigins,
     database: {
+      driver,
       connectionString: env.DATABASE_URL,
       max: boundedInteger(env.DB_POOL_MAX, 5, 'DB_POOL_MAX', 1, 50),
       ssl: sslEnabled ? { rejectUnauthorized: true, ...(ca ? { ca } : {}) } : false,

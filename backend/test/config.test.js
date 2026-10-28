@@ -33,3 +33,20 @@ test('production requires an explicit frontend origin allowlist', () => {
   assert.deepEqual(loadConfig({ ...env, NODE_ENV: 'production', CORS_ORIGINS: 'https://garage.example.com' }).corsOrigins,
     ['https://garage.example.com']);
 });
+
+test('Postgres is the default; MySQL must be explicitly selected with a matching URL', () => {
+  assert.equal(loadConfig(env).database.driver, 'postgres');
+  const mysql = { DB_CLIENT: 'mysql', DATABASE_URL: 'mysql://garage:password@localhost:3306/garage_management_db', DB_SSL: 'false' };
+  assert.equal(loadConfig(mysql).database.driver, 'mysql');
+  assert.throws(() => loadConfig({ ...env, DB_CLIENT: 'sqlite' }));
+  assert.throws(() => loadConfig({ ...env, DB_CLIENT: 'mysql' }));
+  assert.throws(() => loadConfig({ ...mysql, DB_CLIENT: 'postgres' }));
+  assert.throws(() => loadConfig({ ...mysql, DATABASE_URL: `${mysql.DATABASE_URL}?multipleStatements=true` }));
+  assert.throws(() => loadConfig({ ...mysql, DATABASE_URL: 'mysql://garage:%XX@localhost/garage' }));
+});
+
+test('remote MySQL requires verified TLS, including in development', () => {
+  const mysql = { DB_CLIENT: 'mysql', DATABASE_URL: 'mysql://garage:password@mysql.example.com/garage_management_db' };
+  assert.equal(loadConfig(mysql).database.ssl.rejectUnauthorized, true);
+  assert.throws(() => loadConfig({ ...mysql, DB_SSL: 'false' }));
+});
