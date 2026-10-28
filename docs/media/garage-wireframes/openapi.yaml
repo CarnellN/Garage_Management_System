@@ -1,0 +1,4979 @@
+# Garage Management System API contract
+# OpenAPI 3.0.3; database: garage_management_db
+openapi: "3.0.3"
+info:
+  title: "Garage Management System API"
+  version: "1.0.0"
+  description: |-
+    REST API contract for garage_management_db. Covers customer registration, vehicles, scheduling, assigned repair work, invoicing and payments.
+
+    Authorization: all operations require a bearer session except registration and login. x-roles lists allowed application roles and is documentation, not an OpenAPI security scope; enforce role and object ownership checks server-side on every request. CUSTOMER ownership follows USER.customer_id -> CUSTOMER -> VEHICLE -> BOOKING/JOB_CARD -> INVOICE -> PAYMENT. MECHANIC access to jobs/tasks/job parts is limited to current assignments. ADMIN oversees all operations. Caller-supplied identifiers never override ownership. Return 404 for inaccessible objects. Lists must apply the same scope before pagination/counting; an explicit out-of-scope owner or parent filter returns 404. Use non-null API roles and statuses; migrate legacy nullable values before serving them.
+
+    Input: reject unknown fields and blank names; PATCH applies only supplied fields, and explicit null is accepted only where nullable. Check foreign keys, enum values and string limits. IDs are positive INTs. Date-time input requires an explicit offset and is stored in UTC. All amounts are exact decimal strings in KES; calculate using decimal arithmetic. Client cannot set IDs, totals, payment timestamps or ownership links not exposed in write schemas. Lists use page/page_size (max 100), return items and pagination.total, and default to ascending primary key unless otherwise stated. Counts are scoped; pagination is not a multi-request snapshot.
+
+    Scheduling: garage timezone Africa/Nairobi. Operator configures opening hours, enabled bays and labor hourly rate outside this API. A reservation occupies [scheduled_at, ends_at). PENDING, CONFIRMED and CHECKED_IN consume bay and vehicle capacity until end or terminal transition. Prevent interval overlap for each bay and each vehicle through database-enforced constraints or serializable transactions with locking and retry; application prechecks alone are insufficient. Availability is advisory. Use ETags/If-Match on booking/job writes; stale writes return 412 and missing preconditions 428. Parent job versions include task/part changes. Mutations revalidate role, assignment, state and balance in the same transaction. No double-booking, duplicate invoice, duplicate settled provider transaction, or overpayment under concurrent use.
+
+    Security: TLS is mandatory outside local development. Store salted adaptive password hashes, never plaintext/reversible passwords. Use parameterized SQL, allowlisted sort/filter expressions, least-privilege database access, signed expiring tokens with issuer/audience verification, immediate session revocation, login rate limits and restricted CORS. Never expose password hashes in any response. Customer and staff email normalization must be consistent. Audit authorization, authentication and writes without secrets. Authentication responses and all sensitive responses use Cache-Control: no-store. Request correlation uses server-generated X-Request-ID.
+
+    Reliability/usability targets: with a production-sized dataset at the agreed deployment load (baseline: 100 concurrent active users), p95 API response time is <= 1000 ms excluding external payment-provider time, and p95 primary page load is < 3 seconds on a documented representative mobile network. Verify with load tests and real browser measurements; the contract does not implement these guarantees. Use pagination, indexed foreign keys/date filters and bounded queries. Frontend acceptance requires responsive layouts at 360px and desktop widths, labeled accessible controls, clear field errors, loading indicators and confirmation of payments/bookings. Monitor error rate and latency; transactions must roll back fully on failure.
+
+    Business scope: no tax, discounts, refunds, stock inventory or account recovery in v1. Record only parts consumed, not warehouse stock. No hard deletion of users, customers, bookings, job cards, invoices or payments. Profiles created by receptionists have no login until a separately verified linking process is implemented. API credential provisioning/bootstrap of the first admin is an out-of-band deployment operation. Payment providers and their authenticated callback/reconciliation adapters must be selected during implementation; a client request alone never proves payment.
+  x-database-name: "garage_management_db"
+servers:
+  -
+    url: "http://localhost:8000/api/v1"
+    description: "Local development only; replace port to match backend."
+  -
+    url: "https://{host}/api/v1"
+    description: "Production deployment placeholder."
+    variables:
+      host:
+        default: "garage.example.com"
+tags:
+  -
+    name: "Authentication"
+  -
+    name: "Users"
+  -
+    name: "Customers"
+  -
+    name: "Vehicles"
+  -
+    name: "Bookings"
+  -
+    name: "Job cards"
+  -
+    name: "Tasks"
+  -
+    name: "Service tasks"
+  -
+    name: "Parts"
+  -
+    name: "Job parts"
+  -
+    name: "Invoices"
+  -
+    name: "Payments"
+  -
+    name: "Audit"
+security:
+  -
+    bearerAuth: []
+x-schema-extensions:
+  description: "Required implementation additions to the supplied relational model; this contract is not a migration."
+  USER:
+    - "Unique normalized login email, password_hash, active, nullable unique customer_id FK, session/token revocation storage. CUSTOMER roles require a linked customer_id; staff roles require null. Reject legacy null/unknown roles."
+  BOOKING:
+    - "ends_at, bay_id FK, version; non-null status; BAY table and opening-hours/capacity configuration. Enforce overlap exclusion for bay and vehicle, not only uniqueness of start timestamps."
+  JOB_CARD:
+    - "version and non-null status; unique non-null booking_id; enforce one active job per vehicle."
+  TASK:
+    - "Keep supplied TASK.job_card_id non-null for performed tasks. Add separate SERVICE_TASK template table with service_task_id, name, nullable standard_hours."
+  JOB_PARTS:
+    - "unit_price_snapshot DECIMAL(10,2) captured on first use. Composite primary key remains unchanged."
+  INVOICE:
+    - "Immutable INVOICE_LINE snapshots for description, quantity/hours, unit rate and rounded line amount; fixed configured KES currency and labor rate. amount_paid, balance_due and payment_status are derived, not client writable."
+  PAYMENT:
+    - "Unique non-null provider transaction references for non-cash payments; reject zero amounts. API requires method even though the supplied column is nullable; backfill legacy records before serving. PAYMENT_INTENT table stores durable status, reserved amount, expiry, ownership, provider ID and settled payment link."
+  AUDIT:
+    - "Append-only AUDIT_EVENT table with actor, action, resource, timestamp, request ID and outcome; restricted admin reads."
+  IDEMPOTENCY:
+    - "Durable unique principal/method/path/key record with request fingerprint and replayable response, committed with the business transaction."
+paths:
+  "/auth/register":
+    post:
+      tags:
+        - "Authentication"
+      operationId: "registerCustomer"
+      summary: "Register a customer account"
+      description: "Public. Create the account and profile in one transaction. Role is always CUSTOMER. Enforce case-insensitive unique login email. Does not silently attach an existing profile."
+      x-roles: []
+      responses:
+        "201":
+          description: "Created."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+            Location:
+              description: "Relative or absolute URI of the created resource."
+              schema:
+                type: "string"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/AuthSession"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      security: []
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema:
+              "$ref": "#/components/schemas/RegisterRequest"
+  "/auth/login":
+    post:
+      tags:
+        - "Authentication"
+      operationId: "login"
+      summary: "Log in"
+      description: "Public. Rate-limit by account and source. Disabled accounts cannot log in. Return a short-lived bearer access token; return a generic 401 for all credential failures."
+      x-roles: []
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/AuthSession"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      security: []
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema:
+              "$ref": "#/components/schemas/LoginRequest"
+  "/auth/me":
+    get:
+      tags:
+        - "Authentication"
+      operationId: "getCurrentUser"
+      summary: "Get the authenticated user"
+      description: "Returns the current account and linked customer_id, if any."
+      x-roles:
+        - "CUSTOMER"
+        - "RECEPTIONIST"
+        - "MECHANIC"
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/User"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+  "/auth/logout":
+    post:
+      tags:
+        - "Authentication"
+      operationId: "logout"
+      summary: "Revoke the current session"
+      description: "Revoke the current token/session immediately, including remaining token lifetime. Repeated logout with a revoked token returns 401."
+      x-roles:
+        - "CUSTOMER"
+        - "RECEPTIONIST"
+        - "MECHANIC"
+        - "ADMIN"
+      responses:
+        "204":
+          description: "Completed; no response body."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+  "/users":
+    get:
+      tags:
+        - "Users"
+      operationId: "listStaffUsers"
+      summary: "List staff accounts"
+      description: "Lists staff only. Customer logins are not exposed through staff management."
+      x-roles:
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/UserList"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          name: "role"
+          in: "query"
+          required: false
+          schema:
+            type: "string"
+            enum:
+              - "RECEPTIONIST"
+              - "MECHANIC"
+              - "ADMIN"
+        -
+          "$ref": "#/components/parameters/Page"
+        -
+          "$ref": "#/components/parameters/PageSize"
+    post:
+      tags:
+        - "Users"
+      operationId: "createStaffUser"
+      summary: "Create a staff account"
+      description: "Only ADMIN may provision staff. Login email is globally unique."
+      x-roles:
+        - "ADMIN"
+      responses:
+        "201":
+          description: "Created."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+            Location:
+              description: "Relative or absolute URI of the created resource."
+              schema:
+                type: "string"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/User"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          "$ref": "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema:
+              "$ref": "#/components/schemas/StaffCreate"
+  "/users/{userId}":
+    get:
+      tags:
+        - "Users"
+      operationId: "getStaffUser"
+      summary: "Get a staff account"
+      description: "Returns a staff account."
+      x-roles:
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/User"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          name: "userId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+    patch:
+      tags:
+        - "Users"
+      operationId: "updateStaffUser"
+      summary: "Update staff role or activation"
+      description: "Cannot deactivate or demote the last active admin. Role/activation changes invalidate affected sessions. Deactivation of a mechanic with active jobs returns 409 until reassigned. Customer accounts cannot be promoted through this endpoint."
+      x-roles:
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/User"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          name: "userId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema:
+              "$ref": "#/components/schemas/StaffUpdate"
+  "/customers":
+    get:
+      tags:
+        - "Customers"
+      operationId: "listCustomers"
+      summary: "List customer profiles"
+      description: "Search is case-insensitive and parameterized."
+      x-roles:
+        - "RECEPTIONIST"
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/CustomerList"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          name: "search"
+          in: "query"
+          required: false
+          schema:
+            type: "string"
+            maxLength: 160
+        -
+          "$ref": "#/components/parameters/Page"
+        -
+          "$ref": "#/components/parameters/PageSize"
+    post:
+      tags:
+        - "Customers"
+      operationId: "createCustomer"
+      summary: "Register a customer profile"
+      description: "Creates a profile without login credentials; does not create or grant an account."
+      x-roles:
+        - "RECEPTIONIST"
+        - "ADMIN"
+      responses:
+        "201":
+          description: "Created."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+            Location:
+              description: "Relative or absolute URI of the created resource."
+              schema:
+                type: "string"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/Customer"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          "$ref": "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema:
+              "$ref": "#/components/schemas/CustomerCreate"
+  "/customers/{customerId}":
+    get:
+      tags:
+        - "Customers"
+      operationId: "getCustomer"
+      summary: "Get a customer profile"
+      description: "Customers may access only their linked profile and resources reached through that profile. Receptionist and admin may access all customer resources. Out-of-scope identifiers return 404."
+      x-roles:
+        - "CUSTOMER"
+        - "RECEPTIONIST"
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/Customer"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          name: "customerId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+    patch:
+      tags:
+        - "Customers"
+      operationId: "updateCustomer"
+      summary: "Update customer contact details"
+      description: "Customers may access only their linked profile and resources reached through that profile. Receptionist and admin may access all customer resources. Out-of-scope identifiers return 404. Profile email is contact data; it does not change login email."
+      x-roles:
+        - "CUSTOMER"
+        - "RECEPTIONIST"
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/Customer"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          name: "customerId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema:
+              "$ref": "#/components/schemas/CustomerUpdate"
+  "/vehicles":
+    get:
+      tags:
+        - "Vehicles"
+      operationId: "listVehicles"
+      summary: "List vehicles"
+      description: "Customers may access only their linked profile and resources reached through that profile. Receptionist and admin may access all customer resources. Out-of-scope identifiers return 404. CUSTOMER results are always restricted to owned vehicles."
+      x-roles:
+        - "CUSTOMER"
+        - "RECEPTIONIST"
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/VehicleList"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          name: "customer_id"
+          in: "query"
+          required: false
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+        -
+          name: "registration_no"
+          in: "query"
+          required: false
+          schema:
+            type: "string"
+            maxLength: 30
+        -
+          "$ref": "#/components/parameters/Page"
+        -
+          "$ref": "#/components/parameters/PageSize"
+    post:
+      tags:
+        - "Vehicles"
+      operationId: "createVehicle"
+      summary: "Register a vehicle"
+      description: "Customers may access only their linked profile and resources reached through that profile. Receptionist and admin may access all customer resources. Out-of-scope identifiers return 404. CUSTOMER must supply their linked customer_id. Normalized registration_no is globally unique."
+      x-roles:
+        - "CUSTOMER"
+        - "RECEPTIONIST"
+        - "ADMIN"
+      responses:
+        "201":
+          description: "Created."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+            Location:
+              description: "Relative or absolute URI of the created resource."
+              schema:
+                type: "string"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/Vehicle"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          "$ref": "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema:
+              "$ref": "#/components/schemas/VehicleCreate"
+  "/vehicles/{vehicleId}":
+    get:
+      tags:
+        - "Vehicles"
+      operationId: "getVehicle"
+      summary: "Get a vehicle"
+      description: "Customers may access only their linked profile and resources reached through that profile. Receptionist and admin may access all customer resources. Out-of-scope identifiers return 404."
+      x-roles:
+        - "CUSTOMER"
+        - "RECEPTIONIST"
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/Vehicle"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          name: "vehicleId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+    patch:
+      tags:
+        - "Vehicles"
+      operationId: "updateVehicle"
+      summary: "Update vehicle details"
+      description: "Customers may access only their linked profile and resources reached through that profile. Receptionist and admin may access all customer resources. Out-of-scope identifiers return 404. Reject duplicate normalized registration with 409."
+      x-roles:
+        - "CUSTOMER"
+        - "RECEPTIONIST"
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/Vehicle"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          name: "vehicleId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema:
+              "$ref": "#/components/schemas/VehicleUpdate"
+    delete:
+      tags:
+        - "Vehicles"
+      operationId: "deleteVehicle"
+      summary: "Delete an unused vehicle"
+      description: "Customers may access only their linked profile and resources reached through that profile. Receptionist and admin may access all customer resources. Out-of-scope identifiers return 404. Only vehicles without bookings or job cards may be deleted; otherwise 409. Preserve service and financial history."
+      x-roles:
+        - "CUSTOMER"
+        - "RECEPTIONIST"
+        - "ADMIN"
+      responses:
+        "204":
+          description: "Completed; no response body."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          name: "vehicleId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+  "/bookings/availability":
+    get:
+      tags:
+        - "Bookings"
+      operationId: "listAvailability"
+      summary: "Find available service intervals"
+      description: "Returns advisory slots in garage opening hours for the requested range and duration. Maximum range is 31 days. Bookings must still pass the atomic reservation check. Intervals with zero capacity may be omitted."
+      x-roles:
+        - "CUSTOMER"
+        - "RECEPTIONIST"
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/AvailabilitySlotList"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          name: "from"
+          in: "query"
+          required: true
+          schema:
+            type: "string"
+            format: "date-time"
+            description: "RFC 3339 timestamp with an explicit UTC offset; responses use UTC (Z)."
+        -
+          name: "to"
+          in: "query"
+          required: true
+          schema:
+            type: "string"
+            format: "date-time"
+            description: "RFC 3339 timestamp with an explicit UTC offset; responses use UTC (Z)."
+        -
+          name: "duration_minutes"
+          in: "query"
+          required: false
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 15
+            maximum: 480
+            default: 60
+        -
+          name: "vehicle_id"
+          in: "query"
+          required: false
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+          description: "If supplied, enforce ownership and exclude intervals overlapping this vehicle."
+        -
+          "$ref": "#/components/parameters/Page"
+        -
+          "$ref": "#/components/parameters/PageSize"
+  "/bookings":
+    get:
+      tags:
+        - "Bookings"
+      operationId: "listBookings"
+      summary: "List service appointments"
+      description: "Customers may access only their linked profile and resources reached through that profile. Receptionist and admin may access all customer resources. Out-of-scope identifiers return 404. Sorted by scheduled_at then booking_id. from is inclusive; to is exclusive; maximum range 31 days when both are supplied."
+      x-roles:
+        - "CUSTOMER"
+        - "RECEPTIONIST"
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/BookingList"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          name: "vehicle_id"
+          in: "query"
+          required: false
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+        -
+          name: "status"
+          in: "query"
+          required: false
+          schema:
+            "$ref": "#/components/schemas/BookingStatus"
+        -
+          name: "from"
+          in: "query"
+          required: false
+          schema:
+            type: "string"
+            format: "date-time"
+            description: "RFC 3339 timestamp with an explicit UTC offset; responses use UTC (Z)."
+        -
+          name: "to"
+          in: "query"
+          required: false
+          schema:
+            type: "string"
+            format: "date-time"
+            description: "RFC 3339 timestamp with an explicit UTC offset; responses use UTC (Z)."
+        -
+          "$ref": "#/components/parameters/Page"
+        -
+          "$ref": "#/components/parameters/PageSize"
+    post:
+      tags:
+        - "Bookings"
+      operationId: "createBooking"
+      summary: "Reserve a service appointment"
+      description: "Customers may access only their linked profile and resources reached through that profile. Receptionist and admin may access all customer resources. Out-of-scope identifiers return 404. Atomically select and reserve an enabled bay; reject overlapping active reservations for the vehicle or all occupied bays with 409 BOOKING_CONFLICT. PENDING reservations consume capacity. Enforce opening hours and a maximum duration of 480 minutes."
+      x-roles:
+        - "CUSTOMER"
+        - "RECEPTIONIST"
+        - "ADMIN"
+      responses:
+        "201":
+          description: "Created."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+            ETag:
+              description: "Strong ETag representing the booking or parent job-card version."
+              schema:
+                type: "string"
+                example: "\"3\""
+            Location:
+              description: "Relative or absolute URI of the created resource."
+              schema:
+                type: "string"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/Booking"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          "$ref": "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema:
+              "$ref": "#/components/schemas/BookingCreate"
+  "/bookings/{bookingId}":
+    get:
+      tags:
+        - "Bookings"
+      operationId: "getBooking"
+      summary: "Get an appointment"
+      description: "Customers may access only their linked profile and resources reached through that profile. Receptionist and admin may access all customer resources. Out-of-scope identifiers return 404."
+      x-roles:
+        - "CUSTOMER"
+        - "RECEPTIONIST"
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+            ETag:
+              description: "Strong ETag representing the booking or parent job-card version."
+              schema:
+                type: "string"
+                example: "\"3\""
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/Booking"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          name: "bookingId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+    patch:
+      tags:
+        - "Bookings"
+      operationId: "rescheduleBooking"
+      summary: "Reschedule an appointment"
+      description: "Customers may access only their linked profile and resources reached through that profile. Receptionist and admin may access all customer resources. Out-of-scope identifiers return 404. Only PENDING or CONFIRMED appointments may be rescheduled. Atomically release old interval and reserve the replacement, preserving the old interval on failure. Same capacity and opening-hours rules as creation."
+      x-roles:
+        - "CUSTOMER"
+        - "RECEPTIONIST"
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+            ETag:
+              description: "Strong ETag representing the booking or parent job-card version."
+              schema:
+                type: "string"
+                example: "\"3\""
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/Booking"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+        "412":
+          "$ref": "#/components/responses/PreconditionFailed"
+        "428":
+          "$ref": "#/components/responses/PreconditionRequired"
+      parameters:
+        -
+          "$ref": "#/components/parameters/IfMatch"
+        -
+          name: "bookingId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema:
+              "$ref": "#/components/schemas/BookingReschedule"
+  "/bookings/{bookingId}/status":
+    patch:
+      tags:
+        - "Bookings"
+      operationId: "updateBookingStatus"
+      summary: "Change appointment status"
+      description: "Customers may access only their linked profile and resources reached through that profile. Receptionist and admin may access all customer resources. Out-of-scope identifiers return 404. CUSTOMER may only cancel an owned PENDING or CONFIRMED booking before its start. Staff transitions: PENDING -> CONFIRMED/CANCELLED; CONFIRMED -> CANCELLED/NO_SHOW (NO_SHOW only after start). CHECKED_IN is set only by opening a linked job card; COMPLETED only by completing that job card. Terminal states cannot transition. Cancellation/no-show releases capacity."
+      x-roles:
+        - "CUSTOMER"
+        - "RECEPTIONIST"
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+            ETag:
+              description: "Strong ETag representing the booking or parent job-card version."
+              schema:
+                type: "string"
+                example: "\"3\""
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/Booking"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+        "412":
+          "$ref": "#/components/responses/PreconditionFailed"
+        "428":
+          "$ref": "#/components/responses/PreconditionRequired"
+      parameters:
+        -
+          "$ref": "#/components/parameters/IfMatch"
+        -
+          name: "bookingId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema:
+              "$ref": "#/components/schemas/BookingStatusUpdate"
+  "/job-cards":
+    get:
+      tags:
+        - "Job cards"
+      operationId: "listJobCards"
+      summary: "List job cards"
+      description: "MECHANIC may access only job cards currently assigned to their user_id; receptionists and admins may access all. CUSTOMER may read only owned vehicle jobs and their task/part details. Writes exclude CUSTOMER. Out-of-scope resources return 404."
+      x-roles:
+        - "CUSTOMER"
+        - "RECEPTIONIST"
+        - "MECHANIC"
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/JobCardList"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          name: "vehicle_id"
+          in: "query"
+          required: false
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+        -
+          name: "mechanic_id"
+          in: "query"
+          required: false
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+        -
+          name: "status"
+          in: "query"
+          required: false
+          schema:
+            "$ref": "#/components/schemas/JobCardStatus"
+        -
+          "$ref": "#/components/parameters/Page"
+        -
+          "$ref": "#/components/parameters/PageSize"
+    post:
+      tags:
+        - "Job cards"
+      operationId: "createJobCard"
+      summary: "Open a job card and assign a mechanic"
+      description: "Assigned user must be an active MECHANIC. Server sets opened_at and OPEN status. At most one nonterminal job per vehicle and one job per non-null booking. A linked booking must be CONFIRMED and reference the same vehicle; atomically mark it CHECKED_IN. A null booking_id permits a walk-in."
+      x-roles:
+        - "RECEPTIONIST"
+        - "ADMIN"
+      responses:
+        "201":
+          description: "Created."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+            ETag:
+              description: "Strong ETag representing the booking or parent job-card version."
+              schema:
+                type: "string"
+                example: "\"3\""
+            Location:
+              description: "Relative or absolute URI of the created resource."
+              schema:
+                type: "string"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/JobCard"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          "$ref": "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema:
+              "$ref": "#/components/schemas/JobCardCreate"
+  "/job-cards/{jobCardId}":
+    get:
+      tags:
+        - "Job cards"
+      operationId: "getJobCard"
+      summary: "Get a job card"
+      description: "MECHANIC may access only job cards currently assigned to their user_id; receptionists and admins may access all. CUSTOMER may read only owned vehicle jobs and their task/part details. Writes exclude CUSTOMER. Out-of-scope resources return 404."
+      x-roles:
+        - "CUSTOMER"
+        - "RECEPTIONIST"
+        - "MECHANIC"
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+            ETag:
+              description: "Strong ETag representing the booking or parent job-card version."
+              schema:
+                type: "string"
+                example: "\"3\""
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/JobCard"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          name: "jobCardId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+  "/job-cards/{jobCardId}/assignment":
+    patch:
+      tags:
+        - "Job cards"
+      operationId: "assignMechanic"
+      summary: "Reassign a job card"
+      description: "Only OPEN, IN_PROGRESS or AWAITING_PARTS jobs may be reassigned. New assignee must be an active MECHANIC."
+      x-roles:
+        - "RECEPTIONIST"
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+            ETag:
+              description: "Strong ETag representing the booking or parent job-card version."
+              schema:
+                type: "string"
+                example: "\"3\""
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/JobCard"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+        "412":
+          "$ref": "#/components/responses/PreconditionFailed"
+        "428":
+          "$ref": "#/components/responses/PreconditionRequired"
+      parameters:
+        -
+          "$ref": "#/components/parameters/IfMatch"
+        -
+          name: "jobCardId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema:
+              "$ref": "#/components/schemas/JobCardAssignment"
+  "/job-cards/{jobCardId}/status":
+    patch:
+      tags:
+        - "Job cards"
+      operationId: "updateJobCardStatus"
+      summary: "Update job progress"
+      description: "MECHANIC may access only job cards currently assigned to their user_id; receptionists and admins may access all. CUSTOMER may read only owned vehicle jobs and their task/part details. Writes exclude CUSTOMER. Out-of-scope resources return 404. Transitions: OPEN -> IN_PROGRESS/CANCELLED; IN_PROGRESS -> AWAITING_PARTS/COMPLETED/CANCELLED; AWAITING_PARTS -> IN_PROGRESS/CANCELLED; COMPLETED -> CLOSED. Only staff may cancel or close. COMPLETED requires at least one task and non-null standard_hours for every task; it atomically completes a linked CHECKED_IN booking. Cancellation atomically cancels the linked CHECKED_IN booking and releases capacity; reject cancellation if parts or tasks remain. CLOSED requires an invoice with balance_due zero. CLOSED and CANCELLED are terminal."
+      x-roles:
+        - "MECHANIC"
+        - "RECEPTIONIST"
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+            ETag:
+              description: "Strong ETag representing the booking or parent job-card version."
+              schema:
+                type: "string"
+                example: "\"3\""
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/JobCard"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+        "412":
+          "$ref": "#/components/responses/PreconditionFailed"
+        "428":
+          "$ref": "#/components/responses/PreconditionRequired"
+      parameters:
+        -
+          "$ref": "#/components/parameters/IfMatch"
+        -
+          name: "jobCardId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema:
+              "$ref": "#/components/schemas/JobCardStatusUpdate"
+  "/job-cards/{jobCardId}/tasks":
+    get:
+      tags:
+        - "Tasks"
+      operationId: "listJobTasks"
+      summary: "List repair tasks"
+      description: "MECHANIC may access only job cards currently assigned to their user_id; receptionists and admins may access all. CUSTOMER may read only owned vehicle jobs and their task/part details. Writes exclude CUSTOMER. Out-of-scope resources return 404."
+      x-roles:
+        - "CUSTOMER"
+        - "RECEPTIONIST"
+        - "MECHANIC"
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/TaskList"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          "$ref": "#/components/parameters/Page"
+        -
+          "$ref": "#/components/parameters/PageSize"
+        -
+          name: "jobCardId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+    post:
+      tags:
+        - "Tasks"
+      operationId: "createJobTask"
+      summary: "Log a repair task"
+      description: "MECHANIC may access only job cards currently assigned to their user_id; receptionists and admins may access all. CUSTOMER may read only owned vehicle jobs and their task/part details. Writes exclude CUSTOMER. Out-of-scope resources return 404. Only OPEN, IN_PROGRESS and AWAITING_PARTS jobs may be edited. Serialize with job completion/invoice creation; billed or terminal jobs are immutable.  Templates may be copied by name and standard_hours into a job-specific TASK row."
+      x-roles:
+        - "MECHANIC"
+        - "RECEPTIONIST"
+        - "ADMIN"
+      responses:
+        "201":
+          description: "Created."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+            ETag:
+              description: "Strong ETag representing the booking or parent job-card version."
+              schema:
+                type: "string"
+                example: "\"3\""
+            Location:
+              description: "Relative or absolute URI of the created resource."
+              schema:
+                type: "string"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/Task"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+        "412":
+          "$ref": "#/components/responses/PreconditionFailed"
+        "428":
+          "$ref": "#/components/responses/PreconditionRequired"
+      parameters:
+        -
+          "$ref": "#/components/parameters/IdempotencyKey"
+        -
+          "$ref": "#/components/parameters/IfMatch"
+        -
+          name: "jobCardId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema:
+              "$ref": "#/components/schemas/TaskCreate"
+  "/job-cards/{jobCardId}/tasks/{taskId}":
+    get:
+      tags:
+        - "Tasks"
+      operationId: "getJobTask"
+      summary: "Get a repair task"
+      description: "MECHANIC may access only job cards currently assigned to their user_id; receptionists and admins may access all. CUSTOMER may read only owned vehicle jobs and their task/part details. Writes exclude CUSTOMER. Out-of-scope resources return 404. taskId must belong to jobCardId."
+      x-roles:
+        - "CUSTOMER"
+        - "RECEPTIONIST"
+        - "MECHANIC"
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/Task"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          name: "jobCardId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+        -
+          name: "taskId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+    patch:
+      tags:
+        - "Tasks"
+      operationId: "updateJobTask"
+      summary: "Update a repair task"
+      description: "MECHANIC may access only job cards currently assigned to their user_id; receptionists and admins may access all. CUSTOMER may read only owned vehicle jobs and their task/part details. Writes exclude CUSTOMER. Out-of-scope resources return 404. Only OPEN, IN_PROGRESS and AWAITING_PARTS jobs may be edited. Serialize with job completion/invoice creation; billed or terminal jobs are immutable.  taskId must belong to jobCardId."
+      x-roles:
+        - "MECHANIC"
+        - "RECEPTIONIST"
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+            ETag:
+              description: "Strong ETag representing the booking or parent job-card version."
+              schema:
+                type: "string"
+                example: "\"3\""
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/Task"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+        "412":
+          "$ref": "#/components/responses/PreconditionFailed"
+        "428":
+          "$ref": "#/components/responses/PreconditionRequired"
+      parameters:
+        -
+          "$ref": "#/components/parameters/IfMatch"
+        -
+          name: "jobCardId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+        -
+          name: "taskId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema:
+              "$ref": "#/components/schemas/TaskUpdate"
+    delete:
+      tags:
+        - "Tasks"
+      operationId: "deleteJobTask"
+      summary: "Remove a repair task"
+      description: "MECHANIC may access only job cards currently assigned to their user_id; receptionists and admins may access all. CUSTOMER may read only owned vehicle jobs and their task/part details. Writes exclude CUSTOMER. Out-of-scope resources return 404. Only OPEN, IN_PROGRESS and AWAITING_PARTS jobs may be edited. Serialize with job completion/invoice creation; billed or terminal jobs are immutable.  taskId must belong to jobCardId."
+      x-roles:
+        - "MECHANIC"
+        - "RECEPTIONIST"
+        - "ADMIN"
+      responses:
+        "204":
+          description: "Completed; no response body."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+            ETag:
+              description: "Strong ETag representing the booking or parent job-card version."
+              schema:
+                type: "string"
+                example: "\"3\""
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+        "412":
+          "$ref": "#/components/responses/PreconditionFailed"
+        "428":
+          "$ref": "#/components/responses/PreconditionRequired"
+      parameters:
+        -
+          "$ref": "#/components/parameters/IfMatch"
+        -
+          name: "jobCardId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+        -
+          name: "taskId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+  "/job-cards/{jobCardId}/parts":
+    get:
+      tags:
+        - "Job parts"
+      operationId: "listJobParts"
+      summary: "List parts used on a job"
+      description: "MECHANIC may access only job cards currently assigned to their user_id; receptionists and admins may access all. CUSTOMER may read only owned vehicle jobs and their task/part details. Writes exclude CUSTOMER. Out-of-scope resources return 404."
+      x-roles:
+        - "CUSTOMER"
+        - "RECEPTIONIST"
+        - "MECHANIC"
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/JobPartList"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          "$ref": "#/components/parameters/Page"
+        -
+          "$ref": "#/components/parameters/PageSize"
+        -
+          name: "jobCardId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+  "/job-cards/{jobCardId}/parts/{partId}":
+    put:
+      tags:
+        - "Job parts"
+      operationId: "setJobPartQuantity"
+      summary: "Set a used part quantity"
+      description: "MECHANIC may access only job cards currently assigned to their user_id; receptionists and admins may access all. CUSTOMER may read only owned vehicle jobs and their task/part details. Writes exclude CUSTOMER. Out-of-scope resources return 404. Only OPEN, IN_PROGRESS and AWAITING_PARTS jobs may be edited. Serialize with job completion/invoice creation; billed or terminal jobs are immutable.  Upsert by composite key (job_card_id, part_id); sets absolute quantity. First use snapshots a non-null catalog price; later quantity changes retain that price. Returns 200 for both insert and update."
+      x-roles:
+        - "MECHANIC"
+        - "RECEPTIONIST"
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+            ETag:
+              description: "Strong ETag representing the booking or parent job-card version."
+              schema:
+                type: "string"
+                example: "\"3\""
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/JobPart"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+        "412":
+          "$ref": "#/components/responses/PreconditionFailed"
+        "428":
+          "$ref": "#/components/responses/PreconditionRequired"
+      parameters:
+        -
+          "$ref": "#/components/parameters/IfMatch"
+        -
+          name: "jobCardId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+        -
+          name: "partId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema:
+              "$ref": "#/components/schemas/JobPartPut"
+    delete:
+      tags:
+        - "Job parts"
+      operationId: "removeJobPart"
+      summary: "Remove a part from a job"
+      description: "MECHANIC may access only job cards currently assigned to their user_id; receptionists and admins may access all. CUSTOMER may read only owned vehicle jobs and their task/part details. Writes exclude CUSTOMER. Out-of-scope resources return 404. Only OPEN, IN_PROGRESS and AWAITING_PARTS jobs may be edited. Serialize with job completion/invoice creation; billed or terminal jobs are immutable. "
+      x-roles:
+        - "MECHANIC"
+        - "RECEPTIONIST"
+        - "ADMIN"
+      responses:
+        "204":
+          description: "Completed; no response body."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+            ETag:
+              description: "Strong ETag representing the booking or parent job-card version."
+              schema:
+                type: "string"
+                example: "\"3\""
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+        "412":
+          "$ref": "#/components/responses/PreconditionFailed"
+        "428":
+          "$ref": "#/components/responses/PreconditionRequired"
+      parameters:
+        -
+          "$ref": "#/components/parameters/IfMatch"
+        -
+          name: "jobCardId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+        -
+          name: "partId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+  "/parts":
+    get:
+      tags:
+        - "Parts"
+      operationId: "listParts"
+      summary: "List parts"
+      description: "Read the spare-parts catalog."
+      x-roles:
+        - "CUSTOMER"
+        - "RECEPTIONIST"
+        - "MECHANIC"
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/PartList"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          name: "search"
+          in: "query"
+          required: false
+          schema:
+            type: "string"
+            maxLength: 120
+        -
+          "$ref": "#/components/parameters/Page"
+        -
+          "$ref": "#/components/parameters/PageSize"
+    post:
+      tags:
+        - "Parts"
+      operationId: "createPart"
+      summary: "Create a catalog entry"
+      description: "Admin maintains catalog names and nonnegative pricing/hours."
+      x-roles:
+        - "ADMIN"
+      responses:
+        "201":
+          description: "Created."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+            Location:
+              description: "Relative or absolute URI of the created resource."
+              schema:
+                type: "string"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/Part"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          "$ref": "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema:
+              "$ref": "#/components/schemas/PartCreate"
+  "/parts/{partId}":
+    get:
+      tags:
+        - "Parts"
+      operationId: "getPart"
+      summary: "Get a catalog entry"
+      description: "Retrieve a catalog entry."
+      x-roles:
+        - "CUSTOMER"
+        - "RECEPTIONIST"
+        - "MECHANIC"
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/Part"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          name: "partId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+    patch:
+      tags:
+        - "Parts"
+      operationId: "updatePart"
+      summary: "Update a catalog entry"
+      description: "Changes do not alter task copies, job-part price snapshots or issued invoice lines."
+      x-roles:
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/Part"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          name: "partId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema:
+              "$ref": "#/components/schemas/PartUpdate"
+    delete:
+      tags:
+        - "Parts"
+      operationId: "deletePart"
+      summary: "Delete an unused catalog entry"
+      description: "Referenced parts cannot be deleted (409). Removing a service template leaves copied job tasks intact."
+      x-roles:
+        - "ADMIN"
+      responses:
+        "204":
+          description: "Completed; no response body."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          name: "partId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+  "/service-tasks":
+    get:
+      tags:
+        - "Service tasks"
+      operationId: "listServiceTasks"
+      summary: "List service-tasks"
+      description: "Read reusable standard service task templates; these are separate from job-specific tasks."
+      x-roles:
+        - "CUSTOMER"
+        - "RECEPTIONIST"
+        - "MECHANIC"
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/ServiceTaskList"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          name: "search"
+          in: "query"
+          required: false
+          schema:
+            type: "string"
+            maxLength: 120
+        -
+          "$ref": "#/components/parameters/Page"
+        -
+          "$ref": "#/components/parameters/PageSize"
+    post:
+      tags:
+        - "Service tasks"
+      operationId: "createServiceTask"
+      summary: "Create a catalog entry"
+      description: "Admin maintains catalog names and nonnegative pricing/hours."
+      x-roles:
+        - "ADMIN"
+      responses:
+        "201":
+          description: "Created."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+            Location:
+              description: "Relative or absolute URI of the created resource."
+              schema:
+                type: "string"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/ServiceTask"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          "$ref": "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema:
+              "$ref": "#/components/schemas/ServiceTaskCreate"
+  "/service-tasks/{serviceTaskId}":
+    get:
+      tags:
+        - "Service tasks"
+      operationId: "getServiceTask"
+      summary: "Get a catalog entry"
+      description: "Retrieve a catalog entry."
+      x-roles:
+        - "CUSTOMER"
+        - "RECEPTIONIST"
+        - "MECHANIC"
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/ServiceTask"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          name: "serviceTaskId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+    patch:
+      tags:
+        - "Service tasks"
+      operationId: "updateServiceTask"
+      summary: "Update a catalog entry"
+      description: "Changes do not alter task copies, job-part price snapshots or issued invoice lines."
+      x-roles:
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/ServiceTask"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          name: "serviceTaskId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema:
+              "$ref": "#/components/schemas/ServiceTaskUpdate"
+    delete:
+      tags:
+        - "Service tasks"
+      operationId: "deleteServiceTask"
+      summary: "Delete an unused catalog entry"
+      description: "Referenced parts cannot be deleted (409). Removing a service template leaves copied job tasks intact."
+      x-roles:
+        - "ADMIN"
+      responses:
+        "204":
+          description: "Completed; no response body."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          name: "serviceTaskId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+  "/invoices":
+    get:
+      tags:
+        - "Invoices"
+      operationId: "listInvoices"
+      summary: "List invoices"
+      description: "Customers may access only their linked profile and resources reached through that profile. Receptionist and admin may access all customer resources. Out-of-scope identifiers return 404."
+      x-roles:
+        - "CUSTOMER"
+        - "RECEPTIONIST"
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/InvoiceList"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          name: "customer_id"
+          in: "query"
+          required: false
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+        -
+          name: "job_card_id"
+          in: "query"
+          required: false
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+        -
+          name: "payment_status"
+          in: "query"
+          required: false
+          schema:
+            type: "string"
+            enum:
+              - "UNPAID"
+              - "PARTIALLY_PAID"
+              - "PAID"
+        -
+          "$ref": "#/components/parameters/Page"
+        -
+          "$ref": "#/components/parameters/PageSize"
+    post:
+      tags:
+        - "Invoices"
+      operationId: "createInvoice"
+      summary: "Issue a customer invoice"
+      description: "Only a COMPLETED job may be invoiced. Enforce unique job_card_id in the database. Atomically snapshot lines: each task standard_hours times the configured labor hourly rate, plus each job-part quantity times its unit_price_snapshot. Round each line half-up to two decimal places and sum. Require all task hours/prices and labor rate; reject overflow. No tax or discounts in v1. total_amount and issued_at are server-generated. Issued invoices and lines are immutable. Zero-total invoices are PAID. Concurrent issuance for the same job returns 409 unless an identical idempotency key replays the original response."
+      x-roles:
+        - "RECEPTIONIST"
+        - "ADMIN"
+      responses:
+        "201":
+          description: "Created."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+            Location:
+              description: "Relative or absolute URI of the created resource."
+              schema:
+                type: "string"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/Invoice"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          "$ref": "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema:
+              "$ref": "#/components/schemas/InvoiceCreate"
+  "/invoices/{invoiceId}":
+    get:
+      tags:
+        - "Invoices"
+      operationId: "getInvoice"
+      summary: "Get an invoice and balance"
+      description: "Customers may access only their linked profile and resources reached through that profile. Receptionist and admin may access all customer resources. Out-of-scope identifiers return 404. Payment totals include only settled PAYMENT records."
+      x-roles:
+        - "CUSTOMER"
+        - "RECEPTIONIST"
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/Invoice"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          name: "invoiceId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+  "/invoices/{invoiceId}/payments":
+    get:
+      tags:
+        - "Payments"
+      operationId: "listInvoicePayments"
+      summary: "List settled invoice payments"
+      description: "Customers may access only their linked profile and resources reached through that profile. Receptionist and admin may access all customer resources. Out-of-scope identifiers return 404."
+      x-roles:
+        - "CUSTOMER"
+        - "RECEPTIONIST"
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/PaymentList"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          "$ref": "#/components/parameters/Page"
+        -
+          "$ref": "#/components/parameters/PageSize"
+        -
+          name: "invoiceId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+    post:
+      tags:
+        - "Payments"
+      operationId: "recordPayment"
+      summary: "Record a completed payment"
+      description: "Staff-only recording of cash or independently verified non-cash transactions. Lock the invoice balance; enforce amount > 0 and amount <= unreserved balance, and deduplicate non-cash transaction references globally. Server sets paid_at. Immutable payment records cannot be edited or deleted. Customers must use payment intents."
+      x-roles:
+        - "RECEPTIONIST"
+        - "ADMIN"
+      responses:
+        "201":
+          description: "Created."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+            Location:
+              description: "Relative or absolute URI of the created resource."
+              schema:
+                type: "string"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/Payment"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          "$ref": "#/components/parameters/IdempotencyKey"
+        -
+          name: "invoiceId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema:
+              "$ref": "#/components/schemas/PaymentRecord"
+  "/invoices/{invoiceId}/payment-intents":
+    post:
+      tags:
+        - "Payments"
+      operationId: "createPaymentIntent"
+      summary: "Start an online payment"
+      description: "Customers may access only their linked profile and resources reached through that profile. Receptionist and admin may access all customer resources. Out-of-scope identifiers return 404. Creates a pending provider checkout, never a settled PAYMENT. Atomically reserve amount against invoice balance (including other pending reservations); reject overpayment with 409. Provider confirmation must be authenticated and verified server-to-server, deduplicated by provider transaction ID, and atomically insert exactly one PAYMENT and mark intent SUCCEEDED. FAILED/EXPIRED intents release reservations. Expiry/callback races must reconcile before release; never drop a verified charge. No public callback endpoint is specified; the provider adapter is deployment-specific."
+      x-roles:
+        - "CUSTOMER"
+        - "RECEPTIONIST"
+        - "ADMIN"
+      responses:
+        "201":
+          description: "Created."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+            Location:
+              description: "Relative or absolute URI of the created resource."
+              schema:
+                type: "string"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/PaymentIntent"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          "$ref": "#/components/parameters/IdempotencyKey"
+        -
+          name: "invoiceId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+      requestBody:
+        required: true
+        content:
+          "application/json":
+            schema:
+              "$ref": "#/components/schemas/PaymentIntentCreate"
+  "/payment-intents/{paymentIntentId}":
+    get:
+      tags:
+        - "Payments"
+      operationId: "getPaymentIntent"
+      summary: "Check online payment progress"
+      description: "Customers may access only their linked profile and resources reached through that profile. Receptionist and admin may access all customer resources. Out-of-scope identifiers return 404. Resolve ownership through the intent invoice. A SUCCEEDED intent references a settled payment_id. checkout_url may be null for non-redirect flows; the implementation must provide provider-specific checkout instructions outside this provider-neutral contract."
+      x-roles:
+        - "CUSTOMER"
+        - "RECEPTIONIST"
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/PaymentIntent"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          name: "paymentIntentId"
+          in: "path"
+          required: true
+          schema:
+            type: "string"
+            format: "uuid"
+  "/payments/{paymentId}":
+    get:
+      tags:
+        - "Payments"
+      operationId: "getPayment"
+      summary: "Get a settled payment receipt"
+      description: "Customers may access only their linked profile and resources reached through that profile. Receptionist and admin may access all customer resources. Out-of-scope identifiers return 404."
+      x-roles:
+        - "CUSTOMER"
+        - "RECEPTIONIST"
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/Payment"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          name: "paymentId"
+          in: "path"
+          required: true
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+  "/audit-events":
+    get:
+      tags:
+        - "Audit"
+      operationId: "listAuditEvents"
+      summary: "Review the system audit trail"
+      description: "Append-only audit events for login successes/failures, authorization denials and every mutation. Write successful mutations and audit events atomically or through a durable transactional outbox. Never store passwords, tokens, card data or full payment credentials. Sorted by occurred_at then audit_id."
+      x-roles:
+        - "ADMIN"
+      responses:
+        "200":
+          description: "Successful response."
+          headers:
+            X-Request-ID:
+              description: "Correlation identifier; also returned in errors."
+              schema:
+                type: "string"
+            Cache-Control:
+              description: "Sensitive API responses must not be stored."
+              schema:
+                type: "string"
+                enum:
+                  - "no-store"
+          content:
+            "application/json":
+              schema:
+                "$ref": "#/components/schemas/AuditEventList"
+        "400":
+          "$ref": "#/components/responses/BadRequest"
+        "401":
+          "$ref": "#/components/responses/Unauthorized"
+        "403":
+          "$ref": "#/components/responses/Forbidden"
+        "404":
+          "$ref": "#/components/responses/NotFound"
+        "409":
+          "$ref": "#/components/responses/Conflict"
+        "422":
+          "$ref": "#/components/responses/UnprocessableEntity"
+        "429":
+          "$ref": "#/components/responses/TooManyRequests"
+        "500":
+          "$ref": "#/components/responses/InternalError"
+        "503":
+          "$ref": "#/components/responses/Unavailable"
+      parameters:
+        -
+          name: "actor_user_id"
+          in: "query"
+          required: false
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+        -
+          name: "resource_type"
+          in: "query"
+          required: false
+          schema:
+            type: "string"
+            maxLength: 60
+        -
+          name: "resource_id"
+          in: "query"
+          required: false
+          schema:
+            type: "string"
+            maxLength: 80
+        -
+          name: "from"
+          in: "query"
+          required: false
+          schema:
+            type: "string"
+            format: "date-time"
+            description: "RFC 3339 timestamp with an explicit UTC offset; responses use UTC (Z)."
+        -
+          name: "to"
+          in: "query"
+          required: false
+          schema:
+            type: "string"
+            format: "date-time"
+            description: "RFC 3339 timestamp with an explicit UTC offset; responses use UTC (Z)."
+        -
+          "$ref": "#/components/parameters/Page"
+        -
+          "$ref": "#/components/parameters/PageSize"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: "http"
+      scheme: "bearer"
+      bearerFormat: "JWT"
+      description: "Short-lived signed access token from login or registration. Roles and object scopes are enforced by the server; x-roles is descriptive metadata."
+  parameters:
+    Page:
+      name: "page"
+      in: "query"
+      required: false
+      schema:
+        type: "integer"
+        format: "int32"
+        minimum: 1
+        default: 1
+    PageSize:
+      name: "page_size"
+      in: "query"
+      required: false
+      schema:
+        type: "integer"
+        format: "int32"
+        minimum: 1
+        maximum: 100
+        default: 20
+    IdempotencyKey:
+      name: "Idempotency-Key"
+      in: "header"
+      required: true
+      schema:
+        type: "string"
+        maxLength: 128
+        minLength: 16
+      description: "Required retry key scoped to authenticated principal, HTTP method and canonical path. Retain at least 24 hours. Same key and body replay the original response; different body returns 409. Concurrent identical requests are serialized. Persist key and successful business mutation atomically; validation failures are not cached."
+    IfMatch:
+      name: "If-Match"
+      in: "header"
+      required: true
+      schema:
+        type: "string"
+        example: "\"3\""
+      description: "Strong ETag from the latest individual booking/job-card GET or mutation. Missing returns 428; stale returns 412. Job task/part mutations use the parent job-card ETag and increment its version."
+  responses:
+    BadRequest:
+      description: "Malformed JSON, invalid parameter syntax, or missing Idempotency-Key."
+      headers:
+        X-Request-ID:
+          description: "Correlation identifier; also returned in errors."
+          schema:
+            type: "string"
+        Cache-Control:
+          description: "Sensitive API responses must not be stored."
+          schema:
+            type: "string"
+            enum:
+              - "no-store"
+      content:
+        "application/json":
+          schema:
+            "$ref": "#/components/schemas/Error"
+    Unauthorized:
+      description: "Missing, invalid, expired or revoked bearer token; login uses a generic invalid-credentials message."
+      headers:
+        X-Request-ID:
+          description: "Correlation identifier; also returned in errors."
+          schema:
+            type: "string"
+        Cache-Control:
+          description: "Sensitive API responses must not be stored."
+          schema:
+            type: "string"
+            enum:
+              - "no-store"
+        WWW-Authenticate:
+          schema:
+            type: "string"
+            example: "Bearer"
+      content:
+        "application/json":
+          schema:
+            "$ref": "#/components/schemas/Error"
+    Forbidden:
+      description: "Authenticated user lacks the required role or permitted action."
+      headers:
+        X-Request-ID:
+          description: "Correlation identifier; also returned in errors."
+          schema:
+            type: "string"
+        Cache-Control:
+          description: "Sensitive API responses must not be stored."
+          schema:
+            type: "string"
+            enum:
+              - "no-store"
+      content:
+        "application/json":
+          schema:
+            "$ref": "#/components/schemas/Error"
+    NotFound:
+      description: "Resource does not exist or is outside the caller ownership/assignment scope."
+      headers:
+        X-Request-ID:
+          description: "Correlation identifier; also returned in errors."
+          schema:
+            type: "string"
+        Cache-Control:
+          description: "Sensitive API responses must not be stored."
+          schema:
+            type: "string"
+            enum:
+              - "no-store"
+      content:
+        "application/json":
+          schema:
+            "$ref": "#/components/schemas/Error"
+    Conflict:
+      description: "Business conflict: duplicate key, overlapping reservation, invalid state transition, already invoiced, overpayment, or mismatched idempotency payload."
+      headers:
+        X-Request-ID:
+          description: "Correlation identifier; also returned in errors."
+          schema:
+            type: "string"
+        Cache-Control:
+          description: "Sensitive API responses must not be stored."
+          schema:
+            type: "string"
+            enum:
+              - "no-store"
+      content:
+        "application/json":
+          schema:
+            "$ref": "#/components/schemas/Error"
+    PreconditionFailed:
+      description: "Stale If-Match; refetch the resource before retrying."
+      headers:
+        X-Request-ID:
+          description: "Correlation identifier; also returned in errors."
+          schema:
+            type: "string"
+        Cache-Control:
+          description: "Sensitive API responses must not be stored."
+          schema:
+            type: "string"
+            enum:
+              - "no-store"
+      content:
+        "application/json":
+          schema:
+            "$ref": "#/components/schemas/Error"
+    UnprocessableEntity:
+      description: "Well-formed input violates a field, relationship or business validation rule."
+      headers:
+        X-Request-ID:
+          description: "Correlation identifier; also returned in errors."
+          schema:
+            type: "string"
+        Cache-Control:
+          description: "Sensitive API responses must not be stored."
+          schema:
+            type: "string"
+            enum:
+              - "no-store"
+      content:
+        "application/json":
+          schema:
+            "$ref": "#/components/schemas/Error"
+    PreconditionRequired:
+      description: "Required If-Match header is missing."
+      headers:
+        X-Request-ID:
+          description: "Correlation identifier; also returned in errors."
+          schema:
+            type: "string"
+        Cache-Control:
+          description: "Sensitive API responses must not be stored."
+          schema:
+            type: "string"
+            enum:
+              - "no-store"
+      content:
+        "application/json":
+          schema:
+            "$ref": "#/components/schemas/Error"
+    TooManyRequests:
+      description: "Rate limit exceeded. Retry after the specified number of seconds."
+      headers:
+        X-Request-ID:
+          description: "Correlation identifier; also returned in errors."
+          schema:
+            type: "string"
+        Cache-Control:
+          description: "Sensitive API responses must not be stored."
+          schema:
+            type: "string"
+            enum:
+              - "no-store"
+        Retry-After:
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+      content:
+        "application/json":
+          schema:
+            "$ref": "#/components/schemas/Error"
+    InternalError:
+      description: "Unexpected failure; details are never exposed."
+      headers:
+        X-Request-ID:
+          description: "Correlation identifier; also returned in errors."
+          schema:
+            type: "string"
+        Cache-Control:
+          description: "Sensitive API responses must not be stored."
+          schema:
+            type: "string"
+            enum:
+              - "no-store"
+      content:
+        "application/json":
+          schema:
+            "$ref": "#/components/schemas/Error"
+    Unavailable:
+      description: "Temporarily unavailable; retry only according to idempotency rules."
+      headers:
+        X-Request-ID:
+          description: "Correlation identifier; also returned in errors."
+          schema:
+            type: "string"
+        Cache-Control:
+          description: "Sensitive API responses must not be stored."
+          schema:
+            type: "string"
+            enum:
+              - "no-store"
+        Retry-After:
+          schema:
+            type: "integer"
+            format: "int32"
+            minimum: 1
+      content:
+        "application/json":
+          schema:
+            "$ref": "#/components/schemas/Error"
+  schemas:
+    Role:
+      type: "string"
+      enum:
+        - "CUSTOMER"
+        - "RECEPTIONIST"
+        - "MECHANIC"
+        - "ADMIN"
+    BookingStatus:
+      type: "string"
+      enum:
+        - "PENDING"
+        - "CONFIRMED"
+        - "CHECKED_IN"
+        - "COMPLETED"
+        - "CANCELLED"
+        - "NO_SHOW"
+    JobCardStatus:
+      type: "string"
+      enum:
+        - "OPEN"
+        - "IN_PROGRESS"
+        - "AWAITING_PARTS"
+        - "COMPLETED"
+        - "CLOSED"
+        - "CANCELLED"
+    CustomerCreate:
+      type: "object"
+      additionalProperties: false
+      properties:
+        name:
+          type: "string"
+          maxLength: 120
+          minLength: 1
+          pattern: ".*\\S.*"
+        phone:
+          type: "string"
+          maxLength: 30
+          nullable: true
+        email:
+          type: "string"
+          maxLength: 160
+          format: "email"
+          nullable: true
+      required:
+        - "name"
+    CustomerUpdate:
+      type: "object"
+      additionalProperties: false
+      properties:
+        name:
+          type: "string"
+          maxLength: 120
+          minLength: 1
+          pattern: ".*\\S.*"
+        phone:
+          type: "string"
+          maxLength: 30
+          nullable: true
+        email:
+          type: "string"
+          maxLength: 160
+          format: "email"
+          nullable: true
+      minProperties: 1
+    Customer:
+      type: "object"
+      additionalProperties: false
+      properties:
+        customer_id:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+        name:
+          type: "string"
+          maxLength: 120
+          minLength: 1
+          pattern: ".*\\S.*"
+        phone:
+          type: "string"
+          maxLength: 30
+          nullable: true
+        email:
+          type: "string"
+          maxLength: 160
+          format: "email"
+          nullable: true
+      required:
+        - "customer_id"
+        - "name"
+        - "phone"
+        - "email"
+    VehicleCreate:
+      type: "object"
+      additionalProperties: false
+      properties:
+        customer_id:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+        registration_no:
+          type: "string"
+          maxLength: 30
+          minLength: 1
+          description: "Trimmed and uppercased before uniqueness checks."
+        make:
+          type: "string"
+          maxLength: 60
+          nullable: true
+        model:
+          type: "string"
+          maxLength: 60
+          nullable: true
+      required:
+        - "customer_id"
+        - "registration_no"
+    VehicleUpdate:
+      type: "object"
+      additionalProperties: false
+      properties:
+        registration_no:
+          type: "string"
+          maxLength: 30
+          minLength: 1
+          description: "Trimmed and uppercased before uniqueness checks."
+        make:
+          type: "string"
+          maxLength: 60
+          nullable: true
+        model:
+          type: "string"
+          maxLength: 60
+          nullable: true
+      minProperties: 1
+      description: "Ownership cannot be transferred through this endpoint."
+    Vehicle:
+      type: "object"
+      additionalProperties: false
+      properties:
+        vehicle_id:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+        customer_id:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+        registration_no:
+          type: "string"
+          maxLength: 30
+          minLength: 1
+          description: "Trimmed and uppercased before uniqueness checks."
+        make:
+          type: "string"
+          maxLength: 60
+          nullable: true
+        model:
+          type: "string"
+          maxLength: 60
+          nullable: true
+      required:
+        - "vehicle_id"
+        - "customer_id"
+        - "registration_no"
+        - "make"
+        - "model"
+    User:
+      type: "object"
+      additionalProperties: false
+      properties:
+        user_id:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+        customer_id:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+          nullable: true
+        name:
+          type: "string"
+          maxLength: 120
+          minLength: 1
+          pattern: ".*\\S.*"
+        email:
+          type: "string"
+          maxLength: 160
+          format: "email"
+        role:
+          "$ref": "#/components/schemas/Role"
+        active:
+          type: "boolean"
+      required:
+        - "user_id"
+        - "customer_id"
+        - "name"
+        - "email"
+        - "role"
+        - "active"
+    RegisterRequest:
+      type: "object"
+      additionalProperties: false
+      properties:
+        name:
+          type: "string"
+          maxLength: 120
+          minLength: 1
+          pattern: ".*\\S.*"
+        phone:
+          type: "string"
+          maxLength: 30
+          nullable: true
+        email:
+          type: "string"
+          maxLength: 160
+          format: "email"
+        password:
+          type: "string"
+          maxLength: 128
+          minLength: 12
+          writeOnly: true
+          format: "password"
+          description: "Never returned or logged. Store only a salted adaptive password hash (Argon2id or equivalent)."
+      required:
+        - "name"
+        - "email"
+        - "password"
+      description: "Atomically creates a CUSTOMER user and linked customer profile. Role and customer_id cannot be supplied. Existing receptionist-created profiles require a separately verified account-linking process; email alone never grants ownership."
+    LoginRequest:
+      type: "object"
+      additionalProperties: false
+      properties:
+        email:
+          type: "string"
+          maxLength: 160
+          format: "email"
+        password:
+          type: "string"
+          maxLength: 128
+          minLength: 1
+          format: "password"
+          writeOnly: true
+      required:
+        - "email"
+        - "password"
+    AuthSession:
+      type: "object"
+      additionalProperties: false
+      properties:
+        access_token:
+          type: "string"
+        token_type:
+          type: "string"
+          enum:
+            - "Bearer"
+        expires_in:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+          example: 900
+        user:
+          "$ref": "#/components/schemas/User"
+      required:
+        - "access_token"
+        - "token_type"
+        - "expires_in"
+        - "user"
+    StaffCreate:
+      type: "object"
+      additionalProperties: false
+      properties:
+        name:
+          type: "string"
+          maxLength: 120
+          minLength: 1
+          pattern: ".*\\S.*"
+        email:
+          type: "string"
+          maxLength: 160
+          format: "email"
+        password:
+          type: "string"
+          maxLength: 128
+          minLength: 12
+          writeOnly: true
+          format: "password"
+          description: "Never returned or logged. Store only a salted adaptive password hash (Argon2id or equivalent)."
+        role:
+          type: "string"
+          enum:
+            - "RECEPTIONIST"
+            - "MECHANIC"
+            - "ADMIN"
+      required:
+        - "name"
+        - "email"
+        - "password"
+        - "role"
+    StaffUpdate:
+      type: "object"
+      additionalProperties: false
+      properties:
+        name:
+          type: "string"
+          maxLength: 120
+          minLength: 1
+          pattern: ".*\\S.*"
+        role:
+          type: "string"
+          enum:
+            - "RECEPTIONIST"
+            - "MECHANIC"
+            - "ADMIN"
+        active:
+          type: "boolean"
+      minProperties: 1
+    BookingCreate:
+      type: "object"
+      additionalProperties: false
+      properties:
+        vehicle_id:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+        scheduled_at:
+          type: "string"
+          format: "date-time"
+          description: "RFC 3339 timestamp with an explicit UTC offset; responses use UTC (Z)."
+        ends_at:
+          type: "string"
+          format: "date-time"
+          description: "RFC 3339 timestamp with an explicit UTC offset; responses use UTC (Z)."
+      required:
+        - "vehicle_id"
+        - "scheduled_at"
+        - "ends_at"
+      description: "Half-open interval [scheduled_at, ends_at); ends_at must be later than scheduled_at and start must be in the future. Reserve one garage bay and the vehicle atomically. Initial status is PENDING."
+    BookingReschedule:
+      type: "object"
+      additionalProperties: false
+      properties:
+        scheduled_at:
+          type: "string"
+          format: "date-time"
+          description: "RFC 3339 timestamp with an explicit UTC offset; responses use UTC (Z)."
+        ends_at:
+          type: "string"
+          format: "date-time"
+          description: "RFC 3339 timestamp with an explicit UTC offset; responses use UTC (Z)."
+      required:
+        - "scheduled_at"
+        - "ends_at"
+    BookingStatusUpdate:
+      type: "object"
+      additionalProperties: false
+      properties:
+        status:
+          "$ref": "#/components/schemas/BookingStatus"
+      required:
+        - "status"
+    Booking:
+      type: "object"
+      additionalProperties: false
+      properties:
+        booking_id:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+        vehicle_id:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+        scheduled_at:
+          type: "string"
+          format: "date-time"
+          description: "RFC 3339 timestamp with an explicit UTC offset; responses use UTC (Z)."
+        ends_at:
+          type: "string"
+          format: "date-time"
+          description: "RFC 3339 timestamp with an explicit UTC offset; responses use UTC (Z)."
+        bay_id:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+        status:
+          "$ref": "#/components/schemas/BookingStatus"
+        version:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+      required:
+        - "booking_id"
+        - "vehicle_id"
+        - "scheduled_at"
+        - "ends_at"
+        - "bay_id"
+        - "status"
+        - "version"
+    AvailabilitySlot:
+      type: "object"
+      additionalProperties: false
+      properties:
+        scheduled_at:
+          type: "string"
+          format: "date-time"
+          description: "RFC 3339 timestamp with an explicit UTC offset; responses use UTC (Z)."
+        ends_at:
+          type: "string"
+          format: "date-time"
+          description: "RFC 3339 timestamp with an explicit UTC offset; responses use UTC (Z)."
+        available_bays:
+          type: "integer"
+          format: "int32"
+          minimum: 0
+      required:
+        - "scheduled_at"
+        - "ends_at"
+        - "available_bays"
+    JobCardCreate:
+      type: "object"
+      additionalProperties: false
+      properties:
+        vehicle_id:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+        booking_id:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+          nullable: true
+        mechanic_id:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+      required:
+        - "vehicle_id"
+        - "mechanic_id"
+    JobCardAssignment:
+      type: "object"
+      additionalProperties: false
+      properties:
+        mechanic_id:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+      required:
+        - "mechanic_id"
+    JobCardStatusUpdate:
+      type: "object"
+      additionalProperties: false
+      properties:
+        status:
+          "$ref": "#/components/schemas/JobCardStatus"
+      required:
+        - "status"
+    JobCard:
+      type: "object"
+      additionalProperties: false
+      properties:
+        job_card_id:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+        vehicle_id:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+        booking_id:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+          nullable: true
+        mechanic_id:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+        opened_at:
+          type: "string"
+          format: "date-time"
+          description: "RFC 3339 timestamp with an explicit UTC offset; responses use UTC (Z)."
+        status:
+          "$ref": "#/components/schemas/JobCardStatus"
+        version:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+      required:
+        - "job_card_id"
+        - "vehicle_id"
+        - "booking_id"
+        - "mechanic_id"
+        - "opened_at"
+        - "status"
+        - "version"
+    TaskCreate:
+      type: "object"
+      additionalProperties: false
+      properties:
+        name:
+          type: "string"
+          maxLength: 120
+          minLength: 1
+          pattern: ".*\\S.*"
+        standard_hours:
+          type: "string"
+          pattern: "^(0|[1-9][0-9]{0,3})\\.[0-9]{2}$"
+          example: "1.50"
+          description: "Nonnegative DECIMAL(6,2) standard labor hours."
+          nullable: true
+      required:
+        - "name"
+    TaskUpdate:
+      type: "object"
+      additionalProperties: false
+      properties:
+        name:
+          type: "string"
+          maxLength: 120
+          minLength: 1
+          pattern: ".*\\S.*"
+        standard_hours:
+          type: "string"
+          pattern: "^(0|[1-9][0-9]{0,3})\\.[0-9]{2}$"
+          example: "1.50"
+          description: "Nonnegative DECIMAL(6,2) standard labor hours."
+          nullable: true
+      minProperties: 1
+    Task:
+      type: "object"
+      additionalProperties: false
+      properties:
+        task_id:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+        job_card_id:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+        name:
+          type: "string"
+          maxLength: 120
+          minLength: 1
+          pattern: ".*\\S.*"
+        standard_hours:
+          type: "string"
+          pattern: "^(0|[1-9][0-9]{0,3})\\.[0-9]{2}$"
+          example: "1.50"
+          description: "Nonnegative DECIMAL(6,2) standard labor hours."
+          nullable: true
+      required:
+        - "task_id"
+        - "job_card_id"
+        - "name"
+        - "standard_hours"
+    ServiceTaskCreate:
+      type: "object"
+      additionalProperties: false
+      properties:
+        name:
+          type: "string"
+          maxLength: 120
+          minLength: 1
+          pattern: ".*\\S.*"
+        standard_hours:
+          type: "string"
+          pattern: "^(0|[1-9][0-9]{0,3})\\.[0-9]{2}$"
+          example: "1.50"
+          description: "Nonnegative DECIMAL(6,2) standard labor hours."
+          nullable: true
+      required:
+        - "name"
+      description: "Reusable standard task template, separate from a job-specific TASK row."
+    ServiceTaskUpdate:
+      type: "object"
+      additionalProperties: false
+      properties:
+        name:
+          type: "string"
+          maxLength: 120
+          minLength: 1
+          pattern: ".*\\S.*"
+        standard_hours:
+          type: "string"
+          pattern: "^(0|[1-9][0-9]{0,3})\\.[0-9]{2}$"
+          example: "1.50"
+          description: "Nonnegative DECIMAL(6,2) standard labor hours."
+          nullable: true
+      minProperties: 1
+    ServiceTask:
+      type: "object"
+      additionalProperties: false
+      properties:
+        service_task_id:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+        name:
+          type: "string"
+          maxLength: 120
+          minLength: 1
+          pattern: ".*\\S.*"
+        standard_hours:
+          type: "string"
+          pattern: "^(0|[1-9][0-9]{0,3})\\.[0-9]{2}$"
+          example: "1.50"
+          description: "Nonnegative DECIMAL(6,2) standard labor hours."
+          nullable: true
+      required:
+        - "service_task_id"
+        - "name"
+        - "standard_hours"
+    PartCreate:
+      type: "object"
+      additionalProperties: false
+      properties:
+        name:
+          type: "string"
+          maxLength: 120
+          minLength: 1
+          pattern: ".*\\S.*"
+        unit_price:
+          type: "string"
+          pattern: "^(0|[1-9][0-9]{0,7})\\.[0-9]{2}$"
+          example: "500.00"
+          description: "Exact nonnegative DECIMAL(10,2) unit price, in KES."
+          nullable: true
+      required:
+        - "name"
+    PartUpdate:
+      type: "object"
+      additionalProperties: false
+      properties:
+        name:
+          type: "string"
+          maxLength: 120
+          minLength: 1
+          pattern: ".*\\S.*"
+        unit_price:
+          type: "string"
+          pattern: "^(0|[1-9][0-9]{0,7})\\.[0-9]{2}$"
+          example: "500.00"
+          description: "Exact nonnegative DECIMAL(10,2) unit price, in KES."
+          nullable: true
+      minProperties: 1
+    Part:
+      type: "object"
+      additionalProperties: false
+      properties:
+        part_id:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+        name:
+          type: "string"
+          maxLength: 120
+          minLength: 1
+          pattern: ".*\\S.*"
+        unit_price:
+          type: "string"
+          pattern: "^(0|[1-9][0-9]{0,7})\\.[0-9]{2}$"
+          example: "500.00"
+          description: "Exact nonnegative DECIMAL(10,2) unit price, in KES."
+          nullable: true
+      required:
+        - "part_id"
+        - "name"
+        - "unit_price"
+    JobPartPut:
+      type: "object"
+      additionalProperties: false
+      properties:
+        quantity:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+      required:
+        - "quantity"
+      description: "Sets the absolute quantity, never increments it. Unit price must be configured before a part can be used."
+    JobPart:
+      type: "object"
+      additionalProperties: false
+      properties:
+        job_card_id:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+        part_id:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+        quantity:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+        unit_price_snapshot:
+          type: "string"
+          pattern: "^(0|[1-9][0-9]{0,7})\\.[0-9]{2}$"
+          example: "500.00"
+          description: "Exact nonnegative DECIMAL(10,2) unit price, in KES."
+      required:
+        - "job_card_id"
+        - "part_id"
+        - "quantity"
+        - "unit_price_snapshot"
+    InvoiceCreate:
+      type: "object"
+      additionalProperties: false
+      properties:
+        job_card_id:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+      required:
+        - "job_card_id"
+      description: "Server calculates the total; client cannot set total_amount, dates, labor rates, or part prices."
+    InvoiceLine:
+      type: "object"
+      additionalProperties: false
+      properties:
+        kind:
+          type: "string"
+          enum:
+            - "LABOR"
+            - "PART"
+        description:
+          type: "string"
+          maxLength: 120
+          minLength: 1
+          pattern: ".*\\S.*"
+        quantity:
+          type: "string"
+          pattern: "^(0|[1-9][0-9]*)\\.[0-9]{2}$"
+          example: "2.00"
+        unit_price:
+          type: "string"
+          pattern: "^(0|[1-9][0-9]{0,7})\\.[0-9]{2}$"
+          example: "500.00"
+          description: "Exact nonnegative DECIMAL(10,2) unit price, in KES."
+        line_total:
+          type: "string"
+          pattern: "^(0|[1-9][0-9]{0,9})\\.[0-9]{2}$"
+          example: "2500.00"
+          description: "Exact DECIMAL(12,2) amount represented as a string. Currency is KES throughout this API."
+      required:
+        - "kind"
+        - "description"
+        - "quantity"
+        - "unit_price"
+        - "line_total"
+    Invoice:
+      type: "object"
+      additionalProperties: false
+      properties:
+        invoice_id:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+        job_card_id:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+        total_amount:
+          type: "string"
+          pattern: "^(0|[1-9][0-9]{0,9})\\.[0-9]{2}$"
+          example: "2500.00"
+          description: "Exact DECIMAL(12,2) amount represented as a string. Currency is KES throughout this API."
+        issued_at:
+          type: "string"
+          format: "date-time"
+          description: "RFC 3339 timestamp with an explicit UTC offset; responses use UTC (Z)."
+        currency:
+          type: "string"
+          enum:
+            - "KES"
+        lines:
+          type: "array"
+          items:
+            "$ref": "#/components/schemas/InvoiceLine"
+        amount_paid:
+          type: "string"
+          pattern: "^(0|[1-9][0-9]{0,9})\\.[0-9]{2}$"
+          example: "2500.00"
+          description: "Exact DECIMAL(12,2) amount represented as a string. Currency is KES throughout this API."
+        balance_due:
+          type: "string"
+          pattern: "^(0|[1-9][0-9]{0,9})\\.[0-9]{2}$"
+          example: "2500.00"
+          description: "Exact DECIMAL(12,2) amount represented as a string. Currency is KES throughout this API."
+        payment_status:
+          type: "string"
+          enum:
+            - "UNPAID"
+            - "PARTIALLY_PAID"
+            - "PAID"
+      required:
+        - "invoice_id"
+        - "job_card_id"
+        - "total_amount"
+        - "issued_at"
+        - "currency"
+        - "lines"
+        - "amount_paid"
+        - "balance_due"
+        - "payment_status"
+    PaymentRecord:
+      type: "object"
+      additionalProperties: false
+      properties:
+        amount:
+          type: "string"
+          pattern: "^(0|[1-9][0-9]{0,9})\\.[0-9]{2}$"
+          example: "2500.00"
+          description: "Strictly positive and no greater than balance_due. Zero is rejected with 422."
+        method:
+          type: "string"
+          enum:
+            - "CASH"
+            - "CARD"
+            - "MOBILE_MONEY"
+            - "BANK_TRANSFER"
+        transaction_reference:
+          type: "string"
+          maxLength: 120
+          minLength: 1
+          nullable: true
+      required:
+        - "amount"
+        - "method"
+      description: "Staff attestation of a completed transaction. Non-cash methods require a unique verified transaction_reference. Cannot be called by customers."
+    PaymentIntentCreate:
+      type: "object"
+      additionalProperties: false
+      properties:
+        amount:
+          type: "string"
+          pattern: "^(0|[1-9][0-9]{0,9})\\.[0-9]{2}$"
+          example: "2500.00"
+          description: "Strictly positive and no greater than balance_due."
+        method:
+          type: "string"
+          enum:
+            - "CARD"
+            - "MOBILE_MONEY"
+            - "BANK_TRANSFER"
+      required:
+        - "amount"
+        - "method"
+    PaymentIntent:
+      type: "object"
+      additionalProperties: false
+      properties:
+        payment_intent_id:
+          type: "string"
+          format: "uuid"
+        invoice_id:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+        amount:
+          type: "string"
+          pattern: "^(0|[1-9][0-9]{0,9})\\.[0-9]{2}$"
+          example: "2500.00"
+          description: "Exact DECIMAL(12,2) amount represented as a string. Currency is KES throughout this API."
+        method:
+          type: "string"
+          enum:
+            - "CASH"
+            - "CARD"
+            - "MOBILE_MONEY"
+            - "BANK_TRANSFER"
+        status:
+          type: "string"
+          enum:
+            - "PENDING"
+            - "SUCCEEDED"
+            - "FAILED"
+            - "EXPIRED"
+        checkout_url:
+          type: "string"
+          format: "uri"
+          nullable: true
+        expires_at:
+          type: "string"
+          format: "date-time"
+          description: "RFC 3339 timestamp with an explicit UTC offset; responses use UTC (Z)."
+        payment_id:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+          nullable: true
+      required:
+        - "payment_intent_id"
+        - "invoice_id"
+        - "amount"
+        - "method"
+        - "status"
+        - "checkout_url"
+        - "expires_at"
+        - "payment_id"
+    Payment:
+      type: "object"
+      additionalProperties: false
+      properties:
+        payment_id:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+        invoice_id:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+        amount:
+          type: "string"
+          pattern: "^(0|[1-9][0-9]{0,9})\\.[0-9]{2}$"
+          example: "2500.00"
+          description: "Exact DECIMAL(12,2) amount represented as a string. Currency is KES throughout this API."
+        paid_at:
+          type: "string"
+          format: "date-time"
+          description: "RFC 3339 timestamp with an explicit UTC offset; responses use UTC (Z)."
+        method:
+          type: "string"
+          enum:
+            - "CASH"
+            - "CARD"
+            - "MOBILE_MONEY"
+            - "BANK_TRANSFER"
+        transaction_reference:
+          type: "string"
+          maxLength: 120
+          nullable: true
+      required:
+        - "payment_id"
+        - "invoice_id"
+        - "amount"
+        - "paid_at"
+        - "method"
+        - "transaction_reference"
+    AuditEvent:
+      type: "object"
+      additionalProperties: false
+      properties:
+        audit_id:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+        actor_user_id:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+          nullable: true
+        action:
+          type: "string"
+          maxLength: 100
+        resource_type:
+          type: "string"
+          maxLength: 60
+        resource_id:
+          type: "string"
+          maxLength: 80
+          nullable: true
+        occurred_at:
+          type: "string"
+          format: "date-time"
+          description: "RFC 3339 timestamp with an explicit UTC offset; responses use UTC (Z)."
+        request_id:
+          type: "string"
+          maxLength: 100
+        outcome:
+          type: "string"
+          enum:
+            - "SUCCESS"
+            - "DENIED"
+            - "FAILURE"
+      required:
+        - "audit_id"
+        - "actor_user_id"
+        - "action"
+        - "resource_type"
+        - "resource_id"
+        - "occurred_at"
+        - "request_id"
+        - "outcome"
+    Error:
+      type: "object"
+      additionalProperties: false
+      properties:
+        code:
+          type: "string"
+          example: "BOOKING_CONFLICT"
+        message:
+          type: "string"
+          example: "No bay is available for the requested interval."
+        request_id:
+          type: "string"
+          example: "req-83f120"
+        details:
+          type: "array"
+          items:
+            type: "object"
+            additionalProperties: false
+            properties:
+              field:
+                type: "string"
+              message:
+                type: "string"
+            required:
+              - "field"
+              - "message"
+      required:
+        - "code"
+        - "message"
+        - "request_id"
+    Pagination:
+      type: "object"
+      additionalProperties: false
+      properties:
+        page:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+        page_size:
+          type: "integer"
+          format: "int32"
+          minimum: 1
+          maximum: 100
+        total:
+          type: "integer"
+          format: "int32"
+          minimum: 0
+      required:
+        - "page"
+        - "page_size"
+        - "total"
+    CustomerList:
+      type: "object"
+      additionalProperties: false
+      properties:
+        items:
+          type: "array"
+          items:
+            "$ref": "#/components/schemas/Customer"
+        pagination:
+          "$ref": "#/components/schemas/Pagination"
+      required:
+        - "items"
+        - "pagination"
+    VehicleList:
+      type: "object"
+      additionalProperties: false
+      properties:
+        items:
+          type: "array"
+          items:
+            "$ref": "#/components/schemas/Vehicle"
+        pagination:
+          "$ref": "#/components/schemas/Pagination"
+      required:
+        - "items"
+        - "pagination"
+    UserList:
+      type: "object"
+      additionalProperties: false
+      properties:
+        items:
+          type: "array"
+          items:
+            "$ref": "#/components/schemas/User"
+        pagination:
+          "$ref": "#/components/schemas/Pagination"
+      required:
+        - "items"
+        - "pagination"
+    BookingList:
+      type: "object"
+      additionalProperties: false
+      properties:
+        items:
+          type: "array"
+          items:
+            "$ref": "#/components/schemas/Booking"
+        pagination:
+          "$ref": "#/components/schemas/Pagination"
+      required:
+        - "items"
+        - "pagination"
+    AvailabilitySlotList:
+      type: "object"
+      additionalProperties: false
+      properties:
+        items:
+          type: "array"
+          items:
+            "$ref": "#/components/schemas/AvailabilitySlot"
+        pagination:
+          "$ref": "#/components/schemas/Pagination"
+      required:
+        - "items"
+        - "pagination"
+    JobCardList:
+      type: "object"
+      additionalProperties: false
+      properties:
+        items:
+          type: "array"
+          items:
+            "$ref": "#/components/schemas/JobCard"
+        pagination:
+          "$ref": "#/components/schemas/Pagination"
+      required:
+        - "items"
+        - "pagination"
+    TaskList:
+      type: "object"
+      additionalProperties: false
+      properties:
+        items:
+          type: "array"
+          items:
+            "$ref": "#/components/schemas/Task"
+        pagination:
+          "$ref": "#/components/schemas/Pagination"
+      required:
+        - "items"
+        - "pagination"
+    ServiceTaskList:
+      type: "object"
+      additionalProperties: false
+      properties:
+        items:
+          type: "array"
+          items:
+            "$ref": "#/components/schemas/ServiceTask"
+        pagination:
+          "$ref": "#/components/schemas/Pagination"
+      required:
+        - "items"
+        - "pagination"
+    PartList:
+      type: "object"
+      additionalProperties: false
+      properties:
+        items:
+          type: "array"
+          items:
+            "$ref": "#/components/schemas/Part"
+        pagination:
+          "$ref": "#/components/schemas/Pagination"
+      required:
+        - "items"
+        - "pagination"
+    JobPartList:
+      type: "object"
+      additionalProperties: false
+      properties:
+        items:
+          type: "array"
+          items:
+            "$ref": "#/components/schemas/JobPart"
+        pagination:
+          "$ref": "#/components/schemas/Pagination"
+      required:
+        - "items"
+        - "pagination"
+    InvoiceList:
+      type: "object"
+      additionalProperties: false
+      properties:
+        items:
+          type: "array"
+          items:
+            "$ref": "#/components/schemas/Invoice"
+        pagination:
+          "$ref": "#/components/schemas/Pagination"
+      required:
+        - "items"
+        - "pagination"
+    PaymentList:
+      type: "object"
+      additionalProperties: false
+      properties:
+        items:
+          type: "array"
+          items:
+            "$ref": "#/components/schemas/Payment"
+        pagination:
+          "$ref": "#/components/schemas/Pagination"
+      required:
+        - "items"
+        - "pagination"
+    AuditEventList:
+      type: "object"
+      additionalProperties: false
+      properties:
+        items:
+          type: "array"
+          items:
+            "$ref": "#/components/schemas/AuditEvent"
+        pagination:
+          "$ref": "#/components/schemas/Pagination"
+      required:
+        - "items"
+        - "pagination"
