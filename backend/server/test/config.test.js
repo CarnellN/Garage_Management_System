@@ -30,7 +30,7 @@ test('TLS cannot be disabled remotely or overridden by connection URI parameters
 
 test('production requires an explicit frontend origin allowlist', () => {
   assert.throws(() => loadConfig({ ...env, NODE_ENV: 'production' }));
-  assert.deepEqual(loadConfig({ ...env, NODE_ENV: 'production', CORS_ORIGINS: 'https://garage.example.com' }).corsOrigins,
+  assert.deepEqual(loadConfig({ ...env, NODE_ENV: 'production', CORS_ORIGINS: 'https://garage.example.com', JWT_SECRET: 'test-secret-with-at-least-32-bytes' }).corsOrigins,
     ['https://garage.example.com']);
 });
 
@@ -52,4 +52,13 @@ test('remote MySQL requires verified TLS, including in development', () => {
   const mysql = { DB_CLIENT: 'mysql', DATABASE_URL: 'mysql://garage:password@mysql.example.com/garage_management_db' };
   assert.equal(loadConfig(mysql).database.ssl.rejectUnauthorized, true);
   assert.throws(() => loadConfig({ ...mysql, DB_SSL: 'false' }));
+});
+
+test('JWT and operational settings fail fast when malformed', () => {
+  assert.throws(() => loadConfig({ ...env, JWT_SECRET: 'short' }));
+  assert.throws(() => loadConfig({ ...env, NODE_ENV: 'production', CORS_ORIGINS: 'https://garage.example.com' }));
+  assert.throws(() => loadConfig({ ...env, GARAGE_OPEN_TIME: '25:00' }));
+  assert.throws(() => loadConfig({ ...env, LABOR_HOURLY_RATE: '-1.00' }));
+  const result = loadConfig({ ...env, GARAGE_OPEN_TIME: '08:00', GARAGE_CLOSE_TIME: '17:00', GARAGE_OPEN_DAYS: '1,2,3,4,5', LABOR_HOURLY_RATE: '1000.00' });
+  assert.deepEqual(result.workflows.schedule, { open: 480, close: 1020, days: [1,2,3,4,5] });
 });
