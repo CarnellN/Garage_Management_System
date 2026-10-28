@@ -1,7 +1,7 @@
 import { postgresAdapter, mysqlAdapter } from './database/adapters.js';
 
 export function createDatabase(config, logger = console, factories = {}) {
-  const driver = config.driver ?? 'postgres';
+  const driver = config.driver ?? 'mysql';
   if (!['postgres', 'mysql'].includes(driver)) throw new Error('Unsupported database driver.');
   const adapter = driver === 'postgres'
     ? postgresAdapter(config, logger, factories.postgres)
