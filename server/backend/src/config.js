@@ -13,7 +13,7 @@ export function loadConfig(env = process.env) {
   if (!['development', 'test', 'production'].includes(nodeEnv)) {
     throw new Error('NODE_ENV must be development, test, or production.');
   }
-  const driver = env.DB_CLIENT ?? 'postgres';
+  const driver = env.DB_CLIENT ?? 'mysql';
   if (!['postgres', 'mysql'].includes(driver)) throw new Error('DB_CLIENT must be postgres or mysql.');
   let databaseUrl;
   try {

@@ -1,6 +1,6 @@
 # Garage Management API
 
-Express 5 server foundation for [the API contract](../docs/openapi.yaml), using Node.js 22+. Supports Supabase/PostgreSQL through `pg` (default) or MySQL 8.0.16+ through `mysql2`.
+Express 5 server foundation for [the API contract](../docs/openapi.yaml), using Node.js 22+. Uses MySQL 8.0.16+ through `mysql2` by default, with Supabase/PostgreSQL through `pg` available as a backup deployment option.
 
 Implemented: verified TLS database pool, parameterized-query/transaction helpers, environment validation, security headers, exact-origin CORS, correlation IDs, sanitized JSON errors, health probes, startup connectivity checks, and graceful shutdown. Authentication, database migrations, and the business endpoints in the contract are the next implementation stage. Unimplemented endpoints return 404; no customer or financial data is exposed yet.
 
@@ -21,7 +21,7 @@ Use `npm ci` for subsequent clean installs with the committed lockfile. On shell
 
 ## Choose the database
 
-Set `DB_CLIENT=postgres` or `DB_CLIENT=mysql` in `backend/.env`; the URI scheme must match. Restart the server after changing providers. This selects one database per running server; it does not migrate or replicate data.
+`DB_CLIENT` defaults to `mysql`. Set `DB_CLIENT=postgres` explicitly to use the Supabase/PostgreSQL backup option; the `DATABASE_URL` scheme must match. Restart the server after changing providers. This selects one database per running server; switching is manual and does not migrate or replicate data or provide automatic failover.
 
 For local MySQL, create `garage_management_db` and a password-protected application user, then configure:
 
@@ -33,9 +33,9 @@ DB_SSL=false
 
 For hosted MySQL, use its actual host/port, `DB_SSL=true`, and `DB_SSL_CA_FILE` if the provider requires a CA certificate. Certificate verification remains enabled. MySQL URIs must not contain query options; driver options are configured in code. `DB_SSL=false` is only allowed for localhost outside production. Use MySQL 8.0.16+ with InnoDB for enforced CHECK constraints, foreign keys and transactions. Run `npm.cmd run db:check` to test the selected connection. Supabase itself provides PostgreSQL; MySQL is an alternative deployment provider.
 
-## Supabase connection
+## Supabase backup connection
 
-In the Supabase dashboard, open **Connect**, select **Session pooler**, and copy the PostgreSQL URI into `DATABASE_URL` in `backend/.env`. Copy your project's actual username and host. Replace the password placeholder with the URL-encoded database password; keep secrets out of the frontend, Git, screenshots and chat. This server connects over PostgreSQL and does not require an anon or service-role API key.
+To switch to Supabase, set `DB_CLIENT=postgres` and `DB_SSL=true`. In the Supabase dashboard, open **Connect**, select **Session pooler**, and copy the PostgreSQL URI into `DATABASE_URL` in `backend/.env`. Copy your project's actual username and host. Replace the password placeholder with the URL-encoded database password; keep secrets out of the frontend, Git, screenshots and chat. This server connects over PostgreSQL and does not require an anon or service-role API key.
 
 The session pooler is useful for a persistent Express process, especially on IPv4 networks. A direct connection also works if the deployment supports the network requirements. The Supabase physical database is generally `postgres`; `garage_management_db` remains the project's logical database name. Do not change the URI database name unless you have actually created that database.
 
