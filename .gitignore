@@ -5,3 +5,28 @@ node_modules/
 coverage/
 *.log
 backend/certs/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Build output
+dist/
+build/
+
+# Frontend
+frontend/node_modules/
+
+# Database
+*.sql.bak
+
+*.md
+*.pdf
