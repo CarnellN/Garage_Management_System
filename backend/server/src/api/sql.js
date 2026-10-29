@@ -3,7 +3,8 @@ export function createStore(db) {
   const quote = db.driver === 'postgres' ? '"' : '`';
   const ident = (name) => {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new Error('Invalid SQL identifier.');
-    return `${quote}${name}${quote}`;
+    // Logical table constants use uppercase; the official physical names are lowercase.
+    return `${quote}${name.toLowerCase()}${quote}`;
   };
   const build = () => {
     const values = [];
@@ -48,7 +49,7 @@ export function createStore(db) {
         clause += ` AND (${searchFields.map((field) => `LOWER(${ident(field)}) LIKE ${b.bind(term)} ESCAPE '!'`).join(' OR ')})`;
       }
       const total = await db.query(`SELECT COUNT(*) AS total FROM ${ident(table)} WHERE ${clause}`, b.values);
-      const firstColumn = { CUSTOMER: 'customer_id', VEHICLE: 'vehicle_id', PART: 'part_id', SERVICE_TASK: 'service_task_id', USER: 'user_id', TASK: 'task_id', JOB_PARTS: 'part_id', AUDIT_EVENT: 'audit_id' }[table];
+      const firstColumn = { CUSTOMER: 'customer_id', VEHICLE: 'vehicle_id', PART: 'part_id', SERVICE_TASK: 'service_task_id', USER: 'user_id', TASK: 'task_id', JOB_PART: 'part_id', AUDIT_EVENT: 'audit_id' }[table];
       const result = await db.query(`SELECT * FROM ${ident(table)} WHERE ${clause} ORDER BY ${ident(firstColumn)} ASC LIMIT ${page_size} OFFSET ${(page - 1) * page_size}`, b.values);
       return { items: result.rows, pagination: { page, page_size, total: Number(total.rows[0].total) } };
     },

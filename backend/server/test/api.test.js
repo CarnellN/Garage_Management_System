@@ -9,6 +9,7 @@ import { createSecurity, hashPassword, verifyPassword } from '../src/api/securit
 import { createStore } from '../src/api/sql.js';
 import { contract, operations } from '../src/api/contract.js';
 import { fakeDatabase } from './support/fake-database.js';
+import { logicalSql } from './support/schema.js';
 
 const auth = { secret: 'test-only-random-like-secret-of-at-least-32-bytes' };
 const logger = { info() {}, error() {} };
@@ -16,16 +17,16 @@ async function setup(t, driver = 'mysql') {
   const database = fakeDatabase(driver);
   const baseQuery = database.query.bind(database);
   database.query = async (sql, values = []) => {
-    const plain = sql.replace(/["`]/g, '');
+    const plain = logicalSql(sql);
     if (plain.includes('FROM BOOKING WHERE') && plain.includes('scheduled_at <')) {
       database.queries.push({ sql, values });
       const rows = database.rows('BOOKING').filter((row) => ['PENDING','CONFIRMED','CHECKED_IN'].includes(row.status) &&
         +new Date(row.scheduled_at) < +new Date(values[0]) && +new Date(row.ends_at) > +new Date(values[1]) && row.booking_id !== values[2]);
       return { rows: structuredClone(rows), rowCount: rows.length };
     }
-    if (plain.includes('FROM JOB_PARTS jp JOIN PART p')) {
+    if (plain.includes('FROM JOB_PART jp JOIN PART p')) {
       database.queries.push({ sql, values });
-      const rows = database.rows('JOB_PARTS').filter((row) => row.job_card_id === values[0]).map((row) => ({ ...row, name: database.rows('PART').find((part) => part.part_id === row.part_id).name }));
+      const rows = database.rows('JOB_PART').filter((row) => row.job_card_id === values[0]).map((row) => ({ ...row, name: database.rows('PART').find((part) => part.part_id === row.part_id).name }));
       return { rows: structuredClone(rows), rowCount: rows.length };
     }
     return baseQuery(sql, values);
@@ -57,13 +58,13 @@ function assertSchema(name, value) {
   assert.equal(validate(value), true, JSON.stringify(validate.errors));
 }
 
-test('discovery and contract identify 53 implemented operations and two provider-dependent operations', async (t) => {
+test('discovery identifies 54 implemented operations and provider-dependent checkout creation', async (t) => {
   const { request } = await setup(t);
   const result = await request('/');
   assert.equal(result.status, 200);
   assert.equal(result.body.operations.length, 55);
-  assert.equal(result.body.operations.filter((operation) => operation.implemented).length, 53);
-  assert.equal(result.body.operations.filter((operation) => operation.requiresPaymentProvider).length, 2);
+  assert.equal(result.body.operations.filter((operation) => operation.implemented).length, 54);
+  assert.equal(result.body.operations.filter((operation) => operation.requiresPaymentProvider).length, 1);
   assert.equal((await request('/api/openapi.json')).body.openapi, '3.0.3');
 });
 
@@ -105,6 +106,79 @@ test('duplicate registration rolls back the new profile and hides constraint det
   assert.equal(duplicate.status, 409);
   assert.equal(database.rows('CUSTOMER').length, 1);
   assert.ok(!JSON.stringify(duplicate.body).includes('secret database'));
+});
+
+test('sessions persist in the official key-store namespace and logout survives security instance replacement', async (t) => {
+  const { database, request, account } = await setup(t);
+  const { token, user } = await account();
+  const grant = database.rows('IDEMPOTENCY_KEY')[0];
+  assert.equal(grant.http_method, 'SESSION');
+  assert.equal(grant.path, '/api/v1/auth/sessions');
+  assert.equal(grant.user_id, user.user_id);
+  assert.equal(grant.response_status, null);
+  assert.equal(grant.response_body, null);
+  assert.ok(!JSON.stringify(grant).includes(token));
+  const req = { get: () => `Bearer ${token}` };
+  await createSecurity(database, auth).authenticate(req);
+  assert.equal((await request('/auth/logout', { token, method: 'POST' })).status, 204);
+  assert.equal(database.rows('IDEMPOTENCY_KEY').filter((row) => row.http_method === 'SESSION').length, 0);
+  await assert.rejects(createSecurity(database, auth).authenticate(req), (error) => error.status === 401);
+});
+
+test('external account changes invalidate existing session fingerprints', async (t) => {
+  const { database, request, account } = await setup(t);
+  const { token } = await account();
+  database.rows('USER')[0].password_hash = 'replacement-hash';
+  assert.equal((await request('/auth/me', { token })).status, 401);
+});
+
+test('staff changes revoke only session grants, preserving durable HTTP retry responses', async (t) => {
+  const { database, request, account } = await setup(t);
+  const admin = await account('ADMIN');
+  const staff = await account('MECHANIC');
+  database.seed('IDEMPOTENCY_KEY', { user_id: staff.user.user_id, http_method: 'POST', path: '/api/v1/example', key: 'normal-http-retry-0001', request_fingerprint: 'hash', response_status: 201, response_body: '{}', expires_at: new Date(Date.now() + 60000), created_at: new Date() });
+  const update = await request(`/users/${staff.user.user_id}`, { token: admin.token, method: 'PATCH', body: { role: 'RECEPTIONIST' } });
+  assert.equal(update.status, 200);
+  assert.equal((await request('/auth/me', { token: staff.token })).status, 401);
+  assert.equal(database.rows('IDEMPOTENCY_KEY').filter((row) => row.user_id === staff.user.user_id && row.http_method === 'POST').length, 1);
+});
+
+test('retry storage uses official columns, replays headers, and rejects case-colliding keys', async (t) => {
+  const { database, request, account } = await setup(t);
+  const { token } = await account('RECEPTIONIST');
+  const options = { token, method: 'POST', body: { name: 'Customer' }, headers: { 'Idempotency-Key': 'Customer-create-key-001' } };
+  const first = await request('/customers', options);
+  assert.equal(first.status, 201);
+  const row = database.rows('IDEMPOTENCY_KEY').find((entry) => entry.http_method === 'POST');
+  assert.equal(row.response_status, 201);
+  assert.equal(typeof row.request_fingerprint, 'string');
+  assert.deepEqual(Object.keys(JSON.parse(row.response_body)).sort(), ['body', 'headers']);
+  const replay = await request('/customers', options);
+  assert.equal(replay.headers.get('location'), first.headers.get('location'));
+  assert.deepEqual(replay.body, first.body);
+  const collision = await request('/customers', { ...options, headers: { 'Idempotency-Key': 'customer-create-key-001' } });
+  assert.equal(collision.status, 409);
+  assert.equal(collision.body.code, 'IDEMPOTENCY_CONFLICT');
+  assert.equal(database.rows('CUSTOMER').length, 1);
+});
+
+test('vehicle year and unsigned mileage match the official schema and can be cleared', async (t) => {
+  const { database, request, account } = await setup(t);
+  database.seed('CUSTOMER', { customer_id: 1, name: 'Jane', phone: null, email: null });
+  const { token } = await account();
+  const options = { token, method: 'POST', body: { customer_id: 1, registration_no: 'KDA 222A', year: 2020, mileage: 4294967295 }, headers: { 'Idempotency-Key': 'vehicle-fields-key-001' } };
+  const created = await request('/vehicles', options);
+  assert.equal(created.status, 201);
+  assertSchema('Vehicle', created.body);
+  assert.equal(created.body.year, 2020);
+  assert.equal(created.body.mileage, 4294967295);
+  assert.equal((await request('/vehicles', { ...options, body: { ...options.body, year: 1885 } })).status, 422);
+  assert.equal((await request('/vehicles', { ...options, body: { ...options.body, mileage: 4294967296 } })).status, 422);
+  assert.equal((await request('/vehicles', { ...options, body: { ...options.body, mileage: -1 } })).status, 422);
+  const cleared = await request(`/vehicles/${created.body.vehicle_id}`, { token, method: 'PATCH', body: { year: null, mileage: null } });
+  assert.equal(cleared.status, 200);
+  assert.equal(cleared.body.year, null);
+  assert.equal(cleared.body.mileage, null);
 });
 
 for (const driver of ['mysql', 'postgres']) {
@@ -172,6 +246,8 @@ test('job writes require a current ETag and prevent edits after completion', asy
   database.rows('JOB_CARD')[0].status = 'COMPLETED';
   const blocked = await request('/job-cards/1/tasks', { ...options, headers: { 'Idempotency-Key': 'job-task-create-0002', 'If-Match': '"4"' } });
   assert.equal(blocked.status, 409);
+  const oversizedPart = await request('/job-cards/1/parts/1', { method: 'PUT', token, body: { quantity: 100000000 }, headers: { 'If-Match': '"4"' } });
+  assert.equal(oversizedPart.status, 422);
 });
 
 test('settled payments use exact decimals, enforce positive balance, and disallow customer attestation', async (t) => {
@@ -180,7 +256,7 @@ test('settled payments use exact decimals, enforce positive balance, and disallo
   database.seed('VEHICLE', { vehicle_id: 1, customer_id: 1, registration_no: 'KDA', make: null, model: null });
   database.seed('JOB_CARD', { job_card_id: 1, vehicle_id: 1, mechanic_id: 9, booking_id: null, status: 'COMPLETED', version: 1, opened_at: new Date() });
   database.seed('INVOICE', { invoice_id: 1, job_card_id: 1, total_amount: '0.30', issued_at: new Date() });
-  database.seed('INVOICE_LINE', { line_id: 1, invoice_id: 1, kind: 'PART', description: 'Test part', quantity: '1.00', unit_price: '0.30', line_total: '0.30' });
+  database.seed('INVOICE_LINE', { invoice_line_id: 1, invoice_id: 1, kind: 'PART', description: 'Test part', quantity: '1.00', unit_price: '0.30', line_total: '0.30' });
   const options = { method: 'POST', token: staff.token, headers: { 'Idempotency-Key': 'record-payment-0001' }, body: { amount: '0.10', method: 'CASH' } };
   assert.equal((await request('/invoices/1/payments', options)).status, 201);
   const invoice = await request('/invoices/1', { token: staff.token });
@@ -191,6 +267,18 @@ test('settled payments use exact decimals, enforce positive balance, and disallo
   assert.equal((await request('/invoices/1/payments', { ...options, body: { amount: '0.00', method: 'CASH' }, headers: { 'Idempotency-Key': 'record-payment-0003' } })).status, 422);
   const customer = await account('CUSTOMER');
   assert.equal((await request('/invoices/1/payments', { ...options, token: customer.token })).status, 403);
+  const intentId = '00000000-0000-4000-8000-000000000001';
+  database.seed('PAYMENT_INTENT', { payment_intent_id: intentId, invoice_id: 1, amount: '0.20', method: 'CARD', status: 'PENDING', checkout_url: null, expires_at: new Date(Date.now() - 60000), payment_id: null, provider_id: 'not-exposed' });
+  const intent = await request(`/payment-intents/${intentId}`, { token: customer.token });
+  assert.equal(intent.status, 200);
+  assertSchema('PaymentIntent', intent.body);
+  assert.equal(intent.body.status, 'PENDING');
+  assert.ok(!JSON.stringify(intent.body).includes('not-exposed'));
+  const other = await account('CUSTOMER', 2);
+  assert.equal((await request(`/payment-intents/${intentId}`, { token: other.token })).status, 404);
+  const reserved = await request('/invoices/1/payments', { ...options, body: { amount: '0.01', method: 'CASH' }, headers: { 'Idempotency-Key': 'reserved-payment-001' } });
+  assert.equal(reserved.status, 409);
+  assert.ok(database.queries.some(({ sql }) => /payment_intent.*FOR UPDATE/.test(sql)));
   const checkout = await request('/invoices/1/payment-intents', { method: 'POST', token: customer.token, headers: { 'Idempotency-Key': 'checkout-intent-0001' }, body: { amount: '0.20', method: 'CARD' } });
   assert.equal(checkout.status, 503);
   assert.equal(checkout.body.code, 'PAYMENT_PROVIDER_NOT_CONFIGURED');
@@ -223,13 +311,15 @@ test('booking reservations reject overlaps, permit adjacency, check hours, and e
   assert.equal(adjacent.status, 201);
   const closedHours = await request('/bookings', { ...options, headers: { 'Idempotency-Key': 'booking-create-0004' }, body: { vehicle_id: 1, scheduled_at: '2030-01-07T19:00:00+03:00', ends_at: '2030-01-07T20:00:00+03:00' } });
   assert.equal(closedHours.status, 422);
+  const fractional = await request('/bookings', { ...options, headers: { 'Idempotency-Key': 'booking-create-0005' }, body: { vehicle_id: 1, scheduled_at: '2030-01-07T09:00:00.100+03:00', ends_at: '2030-01-07T10:00:00+03:00' } });
+  assert.equal(fractional.status, 422);
   const reschedule = { method: 'PATCH', token, body: { scheduled_at: '2030-01-07T11:00:00+03:00', ends_at: '2030-01-07T12:00:00+03:00' }, headers: { 'If-Match': '"0"' } };
   assert.equal((await request('/bookings/1', reschedule)).status, 412);
   const moved = await request('/bookings/1', { ...reschedule, headers: { 'If-Match': '"1"' } });
   assert.equal(moved.status, 200);
   assert.equal(moved.headers.get('etag'), '"2"');
-  assert.ok(database.queries.some(({ sql }) => /BAY.*FOR UPDATE/.test(sql)));
-  assert.ok(database.queries.some(({ sql }) => /BOOKING.*scheduled_at.*FOR UPDATE/.test(sql)));
+  assert.ok(database.queries.some(({ sql }) => /BAY.*FOR UPDATE/.test(logicalSql(sql))));
+  assert.ok(database.queries.some(({ sql }) => /BOOKING.*scheduled_at.*FOR UPDATE/.test(logicalSql(sql))));
 });
 
 for (const driver of ['mysql', 'postgres']) {

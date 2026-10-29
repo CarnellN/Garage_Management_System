@@ -26,6 +26,7 @@ async function bookingFor(store, req, id, lock = false) {
 }
 function windowInput(start, end, { future = true, hours } = {}) {
   const from = date(start), to = date(end);
+  if (+from % 1000 || +to % 1000) invalid('Appointment times must use whole seconds to match the database DATETIME precision.');
   if (!Number.isFinite(+from) || !Number.isFinite(+to) || to <= from || to - from > 480 * 60000 || (future && from <= new Date())) invalid('Provide a future interval of up to 480 minutes with ends_at after scheduled_at.');
   if (!hours) throw new HttpError(503, 'SCHEDULE_NOT_CONFIGURED', 'Garage opening hours are not configured.');
   const localStart = new Date(+from + 3 * 3600000), localEnd = new Date(+to + 3 * 3600000);
@@ -91,7 +92,7 @@ async function invoiceFor(store, req, id, lock = false) {
 async function invoiceView(store, invoice, lockPayments = false) {
   const i = store.ident, marker = store.db.driver === 'postgres' ? '$1' : '?';
   const payments = await store.db.query(`SELECT ${i('amount')} FROM ${i('PAYMENT')} WHERE ${i('invoice_id')} = ${marker}${lockPayments ? ' FOR UPDATE' : ''}`, [invoice.invoice_id]);
-  const lines = await store.db.query(`SELECT ${i('kind')}, ${i('description')}, ${i('quantity')}, ${i('unit_price')}, ${i('line_total')} FROM ${i('INVOICE_LINE')} WHERE ${i('invoice_id')} = ${marker} ORDER BY ${i('line_id')}`, [invoice.invoice_id]);
+  const lines = await store.db.query(`SELECT ${i('kind')}, ${i('description')}, ${i('quantity')}, ${i('unit_price')}, ${i('line_total')} FROM ${i('INVOICE_LINE')} WHERE ${i('invoice_id')} = ${marker} ORDER BY ${i('invoice_line_id')}`, [invoice.invoice_id]);
   const amount = payments.rows.reduce((sum, payment) => sum + cents(payment.amount), 0n);
   const balance = cents(invoice.total_amount) - amount;
   if (balance < 0n) throw new Error('Stored payments exceed the invoice total.');
@@ -185,7 +186,7 @@ export function workflowHandlers({ schedule, laborRate } = {}) {
       const tasks = (await s.db.query(`SELECT * FROM ${i('TASK')} WHERE ${i('job_card_id')} = ${b.bind(job.job_card_id)} FOR UPDATE`, b.values)).rows;
       if (!tasks.length || tasks.some((task) => task.standard_hours === null)) conflict('Completion requires at least one task and standard hours on every task.');
     }
-    if (next === 'CANCELLED' && (await s.find('TASK', { job_card_id: job.job_card_id }) || await s.find('JOB_PARTS', { job_card_id: job.job_card_id }))) conflict('Remove tasks and parts before cancellation.');
+    if (next === 'CANCELLED' && (await s.find('TASK', { job_card_id: job.job_card_id }) || await s.find('JOB_PART', { job_card_id: job.job_card_id }))) conflict('Remove tasks and parts before cancellation.');
     if (next === 'CLOSED') {
       const invoice = await s.find('INVOICE', { job_card_id: job.job_card_id }, { lock: true });
       if (!invoice || (await invoiceView(s, invoice, true)).balance_due !== '0.00') conflict('Closing requires a fully paid invoice.');
@@ -226,25 +227,25 @@ export function workflowHandlers({ schedule, laborRate } = {}) {
     await s.remove('TASK', filter);
     return reply(null, 204, await bumpJob(s, job));
   };
-  h.listJobParts = async (req, s) => { await jobFor(s, req, req.input.params.jobCardId); return reply(project('JobPartList', await s.list('JOB_PARTS', { job_card_id: req.input.params.jobCardId }, req.input.query))); };
+  h.listJobParts = async (req, s) => { await jobFor(s, req, req.input.params.jobCardId); return reply(project('JobPartList', await s.list('JOB_PART', { job_card_id: req.input.params.jobCardId }, req.input.query))); };
   h.setJobPartQuantity = async (req, s) => {
     const job = await jobFor(s, req, req.input.params.jobCardId, true); editableJob(req, job);
     const filter = { job_card_id: job.job_card_id, part_id: req.input.params.partId };
-    const previous = await s.find('JOB_PARTS', filter, { lock: true });
-    if (previous) await s.update('JOB_PARTS', filter, req.body);
+    const previous = await s.find('JOB_PART', filter, { lock: true });
+    if (previous) await s.update('JOB_PART', filter, req.body);
     else {
       const part = await s.find('PART', { part_id: filter.part_id }, { lock: true });
       if (!part) missing();
       if (part.unit_price === null) invalid('Configure the part price before recording usage.');
-      await s.insert('JOB_PARTS', { ...filter, ...req.body, unit_price_snapshot: part.unit_price });
+      await s.insert('JOB_PART', { ...filter, ...req.body, unit_price_snapshot: part.unit_price });
     }
-    return reply(project('JobPart', await s.find('JOB_PARTS', filter)), 200, await bumpJob(s, job));
+    return reply(project('JobPart', await s.find('JOB_PART', filter)), 200, await bumpJob(s, job));
   };
   h.removeJobPart = async (req, s) => {
     const job = await jobFor(s, req, req.input.params.jobCardId, true); editableJob(req, job);
     const filter = { job_card_id: job.job_card_id, part_id: req.input.params.partId };
-    if (!await s.find('JOB_PARTS', filter, { lock: true })) missing();
-    await s.remove('JOB_PARTS', filter);
+    if (!await s.find('JOB_PART', filter, { lock: true })) missing();
+    await s.remove('JOB_PART', filter);
     return reply(null, 204, await bumpJob(s, job));
   };
 
@@ -267,12 +268,15 @@ export function workflowHandlers({ schedule, laborRate } = {}) {
     if (!laborRate) throw new HttpError(503, 'LABOR_RATE_NOT_CONFIGURED', 'The labor hourly rate is not configured.');
     const i = s.ident;
     const tasks = (await s.db.query(`SELECT * FROM ${i('TASK')} WHERE ${i('job_card_id')} = ${s.db.driver === 'postgres' ? '$1' : '?'} FOR UPDATE`, [job.job_card_id])).rows;
-    const parts = (await s.db.query(`SELECT jp.*, p.${i('name')} FROM ${i('JOB_PARTS')} jp JOIN ${i('PART')} p ON p.${i('part_id')} = jp.${i('part_id')} WHERE jp.${i('job_card_id')} = ${s.db.driver === 'postgres' ? '$1' : '?'} FOR UPDATE`, [job.job_card_id])).rows;
+    const parts = (await s.db.query(`SELECT jp.*, p.${i('name')} FROM ${i('JOB_PART')} jp JOIN ${i('PART')} p ON p.${i('part_id')} = jp.${i('part_id')} WHERE jp.${i('job_card_id')} = ${s.db.driver === 'postgres' ? '$1' : '?'} FOR UPDATE`, [job.job_card_id])).rows;
     if (!tasks.length || tasks.some((task) => task.standard_hours === null)) conflict('Every invoice requires completed tasks with standard hours.');
     const lines = tasks.map((task) => ({ kind: 'LABOR', description: task.name, quantity: task.standard_hours, unit_price: laborRate, line_total: totalDecimal((cents(task.standard_hours) * cents(laborRate) + 50n) / 100n) }));
-    for (const part of parts) lines.push({ kind: 'PART', description: part.name, quantity: `${part.quantity}.00`, unit_price: part.unit_price_snapshot, line_total: totalDecimal(BigInt(part.quantity) * cents(part.unit_price_snapshot)) });
+    for (const part of parts) {
+      if (Number(part.quantity) > 99999999) invalid('A part quantity exceeds the invoice_line DECIMAL(10,2) quantity limit.');
+      lines.push({ kind: 'PART', description: part.name, quantity: `${part.quantity}.00`, unit_price: part.unit_price_snapshot, line_total: totalDecimal(BigInt(part.quantity) * cents(part.unit_price_snapshot)) });
+    }
     const total = totalDecimal(lines.reduce((sum, line) => sum + cents(line.line_total), 0n));
-    const id = await s.insert('INVOICE', { job_card_id: job.job_card_id, total_amount: total, issued_at: new Date() }, 'invoice_id');
+    const id = await s.insert('INVOICE', { job_card_id: job.job_card_id, total_amount: total, currency: 'KES', issued_at: new Date() }, 'invoice_id');
     for (const line of lines) await s.insert('INVOICE_LINE', { invoice_id: id, ...line });
     return reply(await invoiceView(s, await s.find('INVOICE', { invoice_id: id })), 201, { Location: `/api/v1/invoices/${id}` });
   };
@@ -287,7 +291,11 @@ export function workflowHandlers({ schedule, laborRate } = {}) {
     const amount = cents(req.body.amount);
     if (amount <= 0n) invalid('Payment amount must be positive.');
     const balance = cents((await invoiceView(s, invoice, true)).balance_due);
-    if (amount > balance) conflict('The payment exceeds the outstanding balance.');
+    const i = s.ident, marker = s.db.driver === 'postgres' ? '$1' : '?';
+    const pending = (await s.db.query(`SELECT ${i('amount')} FROM ${i('PAYMENT_INTENT')} WHERE ${i('invoice_id')} = ${marker} AND ${i('status')} = 'PENDING' FOR UPDATE`, [invoice.invoice_id])).rows;
+    // Expiry alone does not prove a provider charge failed; reserve until reconciled to a terminal status.
+    const reserved = pending.reduce((sum, intent) => sum + cents(intent.amount), 0n);
+    if (amount > balance - reserved) conflict('The payment exceeds the unreserved outstanding balance.');
     const reference = req.body.transaction_reference?.trim() || null;
     if (req.body.method !== 'CASH' && !reference) invalid('Non-cash payments require a verified transaction reference.');
     if (req.body.method === 'CASH' && req.body.transaction_reference) invalid('Cash payments must not include a provider transaction reference.');
@@ -296,7 +304,11 @@ export function workflowHandlers({ schedule, laborRate } = {}) {
   };
   // Online checkout needs a real, authenticated provider integration; never treat a client assertion as settled money.
   h.createPaymentIntent = async (req, s) => { await invoiceFor(s, req, req.input.params.invoiceId); throw new HttpError(503, 'PAYMENT_PROVIDER_NOT_CONFIGURED', 'Online checkout is not configured. Contact the garage to arrange payment.'); };
-  h.getPaymentIntent = async () => { throw new HttpError(503, 'PAYMENT_PROVIDER_NOT_CONFIGURED', 'Online checkout is not configured.'); };
+  h.getPaymentIntent = async (req, s) => {
+    const intent = await s.find('PAYMENT_INTENT', { payment_intent_id: req.input.params.paymentIntentId }) ?? missing();
+    await invoiceFor(s, req, intent.invoice_id);
+    return reply(project('PaymentIntent', intent));
+  };
   h.listAuditEvents = async (req, s) => {
     const q = req.input.query, i = s.ident, b = s.build();
     const clauses = [];

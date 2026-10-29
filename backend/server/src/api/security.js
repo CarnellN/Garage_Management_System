@@ -4,10 +4,10 @@ import { SignJWT, jwtVerify } from 'jose';
 import { HttpError } from '../errors.js';
 import { createStore } from './sql.js';
 import { project } from './contract.js';
+import { saveSession, assertSession } from './sessions.js';
 
 const scrypt = promisify(rawScrypt);
 const passwordOptions = { N: 32768, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
-export const utcDate = (value) => value instanceof Date ? value : new Date(/[zZ]|[+-]\d\d:\d\d$/.test(value) ? value : `${value.replace(' ', 'T')}Z`);
 export async function hashPassword(password) {
   const salt = randomBytes(16).toString('hex');
   const hash = await scrypt(password, salt, 64, passwordOptions);
@@ -40,9 +40,8 @@ export function createSecurity(database, config = {}) {
     async session(store, user) {
       configured();
       assertAccount(user);
-      const now = new Date();
       const id = randomUUID();
-      await store.insert('AUTH_SESSION', { session_id: id, user_id: user.user_id, created_at: now, expires_at: new Date(now.getTime() + ttl * 1000), revoked_at: null });
+      await saveSession(store, user, id, ttl);
       const access_token = await new SignJWT({})
         .setProtectedHeader({ alg: 'HS256', typ: 'JWT' }).setSubject(String(user.user_id)).setJti(id)
         .setIssuer(issuer).setAudience(audience).setIssuedAt().setExpirationTime(`${ttl}s`).sign(key);
@@ -58,10 +57,9 @@ export function createSecurity(database, config = {}) {
         if (!/^[1-9]\d*$/.test(payload.sub) || Number(payload.sub) > 2147483647 || typeof payload.jti !== 'string') throw new Error('Invalid subject.');
       } catch { throw new HttpError(401, 'UNAUTHORIZED', 'The bearer token is invalid or expired.'); }
       const store = createStore(database);
-      const session = await store.find('AUTH_SESSION', { session_id: payload.jti, user_id: Number(payload.sub) });
-      if (!session || session.revoked_at || utcDate(session.expires_at).getTime() <= Date.now()) throw new HttpError(401, 'UNAUTHORIZED', 'The session is no longer valid.');
       const user = await store.find('USER', { user_id: Number(payload.sub) });
       assertAccount(user);
+      await assertSession(store, user, payload.jti);
       req.user = publicUser(user);
       req.sessionId = payload.jti;
     },

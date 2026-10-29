@@ -3,7 +3,8 @@ import { Router } from 'express';
 import { rateLimit } from 'express-rate-limit';
 import { createStore } from './sql.js';
 import { contract, operations, validateRequest } from './contract.js';
-import { createSecurity, assertAccount, utcDate } from './security.js';
+import { createSecurity, assertAccount } from './security.js';
+import { assertSession, utcDate } from './sessions.js';
 import { authHandlers } from './auth-handlers.js';
 import { resourceHandlers } from './resources.js';
 import { workflowHandlers } from './workflows.js';
@@ -26,24 +27,29 @@ async function mutate(database, req, handler) {
       const current = await store.find('USER', { user_id: req.user.user_id }, { lock: true });
       assertAccount(current);
       if (current.role !== req.user.role || Number(current.customer_id) !== Number(req.user.customer_id)) throw new HttpError(401, 'UNAUTHORIZED', 'Your account has changed. Log in again.');
-      const session = await store.find('AUTH_SESSION', { session_id: req.sessionId, user_id: req.user.user_id });
-      if (!session || session.revoked_at || utcDate(session.expires_at).getTime() <= Date.now()) throw new HttpError(401, 'UNAUTHORIZED', 'The session is no longer valid.');
+      await assertSession(store, current, req.sessionId);
     }
     const key = req.input.headers['Idempotency-Key'];
     const canonicalPath = `/api/v1${req.operation.path.replace(/\{(\w+)\}/g, (_, name) => String(req.input.params[name]))}`;
-    const filter = key ? { user_id: req.user.user_id, method: req.method, path: canonicalPath, key } : null;
+    const filter = key ? { user_id: req.user.user_id, http_method: req.method, path: canonicalPath, key } : null;
     const fingerprint = createHash('sha256').update(canonical(req.body ?? {})).digest('hex');
     if (key) {
       const cached = await store.find('IDEMPOTENCY_KEY', filter, { lock: true });
+      // Official MySQL collation is case/accent insensitive. Never replay a different exact key/path.
+      if (cached && (cached.key !== key || cached.path !== canonicalPath || cached.http_method !== req.method)) {
+        throw new HttpError(409, 'IDEMPOTENCY_CONFLICT', 'This key collides with another stored key under the database collation. Use a new unique key.');
+      }
       if (cached && utcDate(cached.expires_at).getTime() > Date.now()) {
-        if (cached.request_hash !== fingerprint) throw new HttpError(409, 'IDEMPOTENCY_CONFLICT', 'This key was already used with a different request.');
-        return typeof cached.response_json === 'string' ? JSON.parse(cached.response_json) : cached.response_json;
+        if (cached.request_fingerprint !== fingerprint) throw new HttpError(409, 'IDEMPOTENCY_CONFLICT', 'This key was already used with a different request.');
+        const saved = typeof cached.response_body === 'string' ? JSON.parse(cached.response_body) : cached.response_body;
+        if (!saved || !cached.response_status) throw new HttpError(409, 'IDEMPOTENCY_PENDING', 'This retry record has no completed response. Reconcile before retrying.');
+        return { status: cached.response_status, body: saved.body, headers: saved.headers };
       }
       if (cached) await store.remove('IDEMPOTENCY_KEY', filter);
     }
     const result = await handler(req, store);
     await audit(store, req, 'SUCCESS');
-    if (key) await store.insert('IDEMPOTENCY_KEY', { ...filter, request_hash: fingerprint, response_json: JSON.stringify(result), created_at: new Date(), expires_at: new Date(Date.now() + 86400000) });
+    if (key) await store.insert('IDEMPOTENCY_KEY', { ...filter, request_fingerprint: fingerprint, response_status: result.status ?? 200, response_body: JSON.stringify({ body: result.body, headers: result.headers ?? {} }), created_at: new Date(), expires_at: new Date(Date.now() + 86400000) });
     return result;
   });
 }
@@ -57,7 +63,7 @@ export function createApiRouter({ database, auth, workflows, logger = console, e
     handler(req, res) { res.status(429).json({ code: 'RATE_LIMITED', message: 'Too many authentication attempts. Try again later.', request_id: req.requestId }); },
   });
   router.get('/', (req, res) => res.json({ name: contract.info.title, version: contract.info.version, docs: '/api/docs', contract: '/api/openapi.json', operations: operations.map((operation) => {
-    const requiresPaymentProvider = ['createPaymentIntent','getPaymentIntent'].includes(operation.operationId);
+    const requiresPaymentProvider = operation.operationId === 'createPaymentIntent';
     return { operationId: operation.operationId, method: operation.method.toUpperCase(), path: `/api/v1${operation.path}`, implemented: Boolean(handlers[operation.operationId]) && !requiresPaymentProvider, requiresPaymentProvider };
   }) }));
   for (const operation of operations) {
