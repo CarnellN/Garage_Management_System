@@ -49,9 +49,9 @@ export function mysqlAdapter(config, createPool = (options) => mysql.createPool(
   async function acquire() {
     const connection = await pool.getConnection();
     let destroyed = false;
-    const execute = async (text, values = []) => {
+    const command = async (protocol, text, values = []) => {
       try {
-        return await connection.execute({ sql: text, timeout: 6000 }, values);
+        return await connection[protocol]({ sql: text, timeout: 6000 }, values);
       } catch (error) {
         // Timed-out writes have an unknown outcome; never reuse this connection or retry.
         if (error.code === 'PROTOCOL_SEQUENCE_TIMEOUT' || error.fatal) {
@@ -61,6 +61,17 @@ export function mysqlAdapter(config, createPool = (options) => mysql.createPool(
         throw error;
       }
     };
+    const execute = (text, values) => command('execute', text, values);
+    // MySQL does not support SET TRANSACTION in the prepared-statement protocol.
+    // Only server-authored connection/transaction commands use the text protocol.
+    const control = (text) => command('query', text);
+    try {
+      // mysql2's timezone option formats values; it does not set CURRENT_TIMESTAMP's session zone.
+      await control("SET time_zone = '+00:00'");
+    } catch (error) {
+      if (!destroyed) connection.destroy();
+      throw error;
+    }
     return {
       async query(sql, values) {
         const [result] = await execute(statement(sql, 'mysql'), values);
@@ -68,8 +79,13 @@ export function mysqlAdapter(config, createPool = (options) => mysql.createPool(
           ? { rows: result, rowCount: result.length, insertId: null }
           : { rows: [], rowCount: result.affectedRows, insertId: result.insertId || null };
       },
-      begin: () => execute('START TRANSACTION'), commit: () => execute('COMMIT'),
-      rollback: () => destroyed ? Promise.reject(new Error('Connection discarded.')) : execute('ROLLBACK'),
+      async begin() {
+        // Applies to the next transaction only; do not rely on a deployment's session default.
+        await control('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE');
+        await control('START TRANSACTION');
+      },
+      commit: () => control('COMMIT'),
+      rollback: () => destroyed ? Promise.reject(new Error('Connection discarded.')) : control('ROLLBACK'),
       release(discard) {
         if (destroyed) return;
         if (discard) connection.destroy();
