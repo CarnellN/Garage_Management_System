@@ -1,6 +1,7 @@
 import { HttpError } from '../errors.js';
 import { project } from './contract.js';
 import { hashPassword, publicUser } from './security.js';
+import { revokeUserSessions } from './sessions.js';
 
 export const missing = () => { throw new HttpError(404, 'NOT_FOUND', 'The resource does not exist.'); };
 export const conflict = (message) => { throw new HttpError(409, 'CONFLICT', message); };
@@ -73,7 +74,7 @@ export function resourceHandlers() {
     if (!req.body.registration_no.trim()) invalid('registration_no must not be blank.');
     ownedCustomer(req, req.body.customer_id);
     if (!await s.find('CUSTOMER', { customer_id: req.body.customer_id }, { lock: true })) missing();
-    const id = await s.insert('VEHICLE', { make: null, model: null, ...req.body, registration_no: req.body.registration_no.trim().toUpperCase() }, 'vehicle_id');
+    const id = await s.insert('VEHICLE', { make: null, model: null, year: null, mileage: null, ...req.body, registration_no: req.body.registration_no.trim().toUpperCase() }, 'vehicle_id');
     return reply(project('Vehicle', await s.find('VEHICLE', { vehicle_id: id })), 201, { Location: `/api/v1/vehicles/${id}` });
   };
   handlers.getVehicle = async (req, s) => reply(project('Vehicle', await vehicleFor(s, req, req.input.params.vehicleId)));
@@ -113,7 +114,7 @@ export function resourceHandlers() {
     handlers[`delete${name}`] = async (req, s) => {
       const filters = { [idKey]: req.input.params[param] };
       if (!await s.find(table, filters, { lock: true })) missing();
-      if (name === 'Part' && await s.find('JOB_PARTS', { part_id: filters.part_id })) conflict('Referenced parts cannot be deleted.');
+      if (name === 'Part' && await s.find('JOB_PART', { part_id: filters.part_id })) conflict('Referenced parts cannot be deleted.');
       await s.remove(table, filters);
       return reply(null, 204);
     };
@@ -140,7 +141,7 @@ export function resourceHandlers() {
       if (await s.find('JOB_CARD', { mechanic_id: user.user_id, status: ['OPEN', 'IN_PROGRESS', 'AWAITING_PARTS', 'COMPLETED'] })) conflict('Reassign active mechanic jobs first.');
     }
     await s.update('USER', filter, req.body);
-    if (req.body.role !== undefined || req.body.active !== undefined) await s.update('AUTH_SESSION', { user_id: user.user_id, revoked_at: null }, { revoked_at: new Date() });
+    if (req.body.role !== undefined || req.body.active !== undefined) await revokeUserSessions(s, user.user_id);
     return reply(publicUser(await s.find('USER', filter)));
   };
   return handlers;

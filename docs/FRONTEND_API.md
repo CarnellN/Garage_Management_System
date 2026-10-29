@@ -9,9 +9,9 @@ While the server is running:
 - `/api/openapi.json` returns the same contract as [openapi.yaml](openapi.yaml).
 - `/health` checks liveness; `/health/ready` checks database connectivity, not schema readiness.
 
-53 operations have server handlers for authentication, staff, customers, vehicles, scheduling, job work, catalogs, invoices, settled payments and audit reads. The two online payment-intent operations return `503 PAYMENT_PROVIDER_NOT_CONFIGURED` until a provider adapter is implemented. Staff can record completed cash or manually verified non-cash payments. A browser cannot declare a payment settled.
+54 operations have server handlers for authentication, staff, customers, vehicles, scheduling, job work, catalogs, invoices, settled payments and audit reads. Online payment-intent creation returns `503 PAYMENT_PROVIDER_NOT_CONFIGURED` until a provider adapter is implemented. Reading an existing payment intent is supported, with invoice ownership checks. Staff can record completed cash or manually verified non-cash payments. A browser cannot declare a payment settled.
 
-The database developer must provision the shared tables and the [integration fields](../backend/database/README.md). Missing tables/columns return `503 SCHEMA_NOT_READY`. Missing JWT secret, opening-hours configuration or labor rate return a specific configuration error. No migrations run on startup. HTTP tests use database doubles; live SQL execution and concurrent booking/payment behavior still require testing against the provisioned schema.
+The database developer provisions the [official schema](../backend/database/schema.sql); [integration notes](../backend/database/README.md) explain the exact mapping and the session-grant convention in idempotency_key. No additional session table is required. Missing tables/columns return `503 SCHEMA_NOT_READY`. Missing JWT secret, opening-hours configuration or labor rate return a specific configuration error. No migrations run on startup. `npm test` uses database doubles; `npm run test:mysql` exercises real SQL and competing booking/invoice/payment requests in a disposable Docker database. Your actual deployment still needs connection/configuration checks and frontend integration.
 
 ## Shared client
 
@@ -44,7 +44,7 @@ await api.logout();
 accessToken = null;
 ```
 
-For registration, call `registerCustomer` with `name`, `email`, `password` (12–128 characters) and optional nullable `phone`. The server creates the CUSTOMER role and customer link; never send `role`, `user_id` or `customer_id` during registration. Accounts created as contact profiles by receptionists do not automatically acquire login access.
+For registration, call `registerCustomer` with `name`, `email`, `password` (12â€“128 characters) and optional nullable `phone`. The server creates the CUSTOMER role and customer link; never send `role`, `user_id` or `customer_id` during registration. Accounts created as contact profiles by receptionists do not automatically acquire login access.
 
 All client methods accept `{ path, query, body, idempotencyKey, etag, signal }` and return `{ data, etag, location, requestId }`. GET parameters belong in `query`; resource IDs belong in `path` using the exact OpenAPI parameter names. The client does not retry, persist tokens, or refresh sessions automatically. Abort/network failures propagate as fetch errors.
 
@@ -70,7 +70,7 @@ await api.updateBookingStatus({
 });
 ```
 
-Availability is advisory; creation may return `409 BOOKING_CONFLICT`. Booking and job mutations require the strong `ETag` from the latest GET, supplied verbatim as `If-Match`. Task/part mutations use the parent job card's ETag and return its new ETag. On `412`, refetch and let the user reconcile; on `428`, supply the missing ETag. Opening hours and future appointment checks run on the server. Date-time requests require an explicit UTC offset; responses use UTC `Z`.
+Availability is advisory; creation may return `409 BOOKING_CONFLICT`. Booking and job mutations require the strong `ETag` from the latest GET, supplied verbatim as `If-Match`. Task/part mutations use the parent job card's ETag and return its new ETag. On `412`, refetch and let the user reconcile; on `428`, supply the missing ETag. Opening hours and future appointment checks run on the server. Date-time requests require an explicit UTC offset; booking write timestamps must have zero fractional seconds to match DATETIME(0). Responses use UTC `Z`.
 
 For operations requiring `Idempotency-Key`, generate a key per logical creation/payment, retain it until the outcome is known, and reuse it with the identical body when recovering from a network failure. The server retains successful responses for at least 24 hours. Do not generate a fresh key when retrying an uncertain payment. Changing the body under the same key returns 409. There are no automatic online payment retries or unverified settlement paths.
 
@@ -90,3 +90,5 @@ Money and standard hours are decimal strings (`"1500.00"`, `"1.50"`), not JavaSc
 `GarageApiError` exposes `status`, `code`, `details`, `requestId` and `retryAfter`. Show field errors for 422, prompt login for 401, hide forbidden actions for 403, show unavailable resources for 404, and handle conflicts without silently overwriting user work. A 503 can indicate database/configuration readiness; show an availability message and preserve unsent form data. Share `requestId` when reporting a server problem. A timeout does not prove a write failed.
 
 Customer: owned profiles/vehicles/bookings/invoices/receipts; read-only owned job details. Receptionist: customer intake, scheduling, job assignment, invoicing and payment recording. Mechanic: assigned job cards, tasks and parts. Admin: staff, catalogs, operations and audit trail. Consult each operation's `x-roles` in the contract for exact permissions.
+
+Vehicle create/update responses now include nullable `year` (1886–2100) and `mileage` (0–4,294,967,295). Both fields may be sent on create/update or cleared with null. Part usage quantity is limited to 99,999,999 so invoice quantities fit the official DECIMAL(10,2). Pending payment intents reserve invoice balance until reconciled; staff recording returns 409 if the unreserved balance is insufficient.

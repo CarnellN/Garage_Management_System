@@ -2,9 +2,9 @@
 
 Express 5 API for [the API contract](../../docs/openapi.yaml), using Node.js 22+. Uses MySQL 8.0.16+ through `mysql2` by default, with Supabase/PostgreSQL through `pg` available as a backup deployment option.
 
-Implemented: 53 business operations for authentication, staff accounts, customers, vehicles, bookings, job cards, tasks, part usage/catalogs, service templates, invoices, settled payments and audit reads. Includes role/ownership checks, request validation from OpenAPI, ETags, transactional audit and durable idempotency. Two online checkout operations return `503 PAYMENT_PROVIDER_NOT_CONFIGURED` until a provider is integrated. See the [frontend integration guide](../../docs/FRONTEND_API.md) and [database handoff](../database/README.md).
+Implemented: 54 business operations for authentication, staff accounts, customers, vehicles, bookings, job cards, tasks, part usage/catalogs, service templates, invoices, settled payments and audit reads. Includes role/ownership checks, request validation from OpenAPI, ETags, transactional audit and durable idempotency. Online checkout creation returns `503 PAYMENT_PROVIDER_NOT_CONFIGURED` until a provider is integrated; existing payment intents can be read with ownership checks. See the [frontend integration guide](../../docs/FRONTEND_API.md) and [database handoff](../database/README.md).
 
-The database developer owns provisioning and migrations. This server does not change the schema. Required authentication/session/audit/retry fields are documented in the handoff; the original ten tables alone do not support all workflows. Missing schema returns `SCHEMA_NOT_READY`. Tests use database doubles; actual SQL/constraints and concurrency must be validated against the provisioned engines before release.
+The database developer owns provisioning and migrations. This server does not change the schema. The server now targets the official lowercase MySQL tables in `backend/database/schema.sql`. Session grants use an isolated SESSION namespace in the existing `idempotency_key` table; no additional session table is required. Missing schema returns `SCHEMA_NOT_READY`. Tests use database doubles; actual SQL/constraints and concurrency must be validated against the provisioned engines before release.
 
 ## Local setup
 
@@ -23,6 +23,16 @@ npm.cmd run dev
 ```
 
 Use `npm ci` for subsequent clean installs with the committed lockfile. On shells without PowerShell execution-policy restrictions, `npm` works in place of `npm.cmd`. `npm start` runs without file watching; `npm test` runs HTTP, configuration and adapter lifecycle tests with mocked driver pools. These tests do not connect to a real database.
+
+## Real MySQL integration tests
+
+With Docker Desktop running, execute `npm.cmd run test:mysql` from `backend/server`. The test starts a disposable `mysql:8.0` container, applies the official schema unchanged, bootstraps only test accounts, and exercises all 55 API routes. It checks authentication/ownership, searches and joined lists, retry replay, timestamp handling, immutable invoice snapshots, pending payment reservations, and competing booking/invoice/payment requests. Checkout creation is expected to return PAYMENT_PROVIDER_NOT_CONFIGURED.
+
+The harness does not load `.env` or use your configured DATABASE_URL. It uses a unique container name, a random loopback-only port, test-only credentials and a temporary in-memory database volume. It closes the HTTP server/pool and stops/removes its own labeled container on completion or test failure. The Docker image is cached locally for subsequent runs. First use may download the image; allow a few minutes and Docker access on Windows. Do not run this command as a production database smoke test.
+
+Verified on 29 October 2026 with MySQL 8.0.46: all eight integration scenarios passed, exercising all 55 operation routes. The 51 unit/API tests also passed. These targeted competing-request checks do not replace production-load/performance testing or verification of the deployment's own database configuration. PostgreSQL has not been verified against a real engine by this suite.
+
+MySQL connection/transaction setup commands use the text protocol because SET TRANSACTION is unsupported by MySQL's prepared-statement protocol. Application data statements continue using prepared execution with bound values. Unit tests cover this distinction to prevent regressions.
 
 ## Choose the database
 
@@ -52,7 +62,7 @@ Reference: [Supabase database connections](https://supabase.com/docs/guides/data
 
 ## Runtime
 
-The default listener is `http://127.0.0.1:8000`; business routes live under `/api/v1`. Set `HOST=0.0.0.0` for containers and deploy behind HTTPS. Set an explicit `CORS_ORIGINS` comma-separated list in production. Proxy trust is disabled until the deployment's exact proxy topology is configured. JWT_SECRET must contain at least 32 bytes and is required in production; use cryptographically random material. Sessions last 900 seconds by default, are checked against AUTH_SESSION on each request, and are revoked by logout or staff role/activation changes. Authentication routes are rate-limited to 30 requests per source IP per 15 minutes in this process; use a shared limiter store/gateway when scaling across replicas.
+The default listener is `http://127.0.0.1:8000`; business routes live under `/api/v1`. Set `HOST=0.0.0.0` for containers and deploy behind HTTPS. Set an explicit `CORS_ORIGINS` comma-separated list in production. Proxy trust is disabled until the deployment's exact proxy topology is configured. JWT_SECRET must contain at least 32 bytes and is required in production; use cryptographically random material. Sessions last 900 seconds by default, are checked against durable SESSION grants in idempotency_key on each request, and are revoked by logout or staff role/activation changes. Authentication routes are rate-limited to 30 requests per source IP per 15 minutes in this process; use a shared limiter store/gateway when scaling across replicas.
 
 | Endpoint | Purpose |
 | --- | --- |
@@ -83,6 +93,6 @@ Use `database.transaction(async (tx) => { ... })` for atomic work; every stateme
 
 Connections have a 5-second establishment timeout and queries a 6-second client timeout. PostgreSQL also has a 5-second server statement timeout. MySQL fails immediately if the pool is at capacity and destroys timed-out connections; no unbounded pool wait queue is used. A client timeout does not prove a write failed: reconcile through workflow idempotency before retrying.
 
-Changing drivers does not make arbitrary SQL portable. Maintain separate reviewed migrations per dialect for identity columns, date types, booleans, upserts, locking, and returned insert IDs. PostgreSQL can prevent overlapping bookings with exclusion constraints; MySQL must lock the relevant bay/vehicle rows in a consistent order and recheck overlap inside the reservation transaction. Test those invariants under concurrency against both real engines before enabling workflows. The current test suite verifies adapter behavior, not engine SQL or booking guarantees.
+The official schema uses lowercase names (including singular `job_part`), `invoice_line_id`, and DATETIME(0). Booking writes require whole seconds; MySQL session timestamps are UTC. MySQL transactions explicitly use SERIALIZABLE. Changing drivers does not make arbitrary SQL portable. Maintain separate reviewed migrations per dialect for identity columns, date types, booleans, upserts, locking, and returned insert IDs. PostgreSQL can prevent overlapping bookings with exclusion constraints; MySQL must lock the relevant bay/vehicle rows in a consistent order and recheck overlap inside the reservation transaction. Test those invariants under concurrency against both real engines before enabling workflows. The current test suite checks adapter behavior, schema identifiers, HTTP workflows and boundary rules; it does not establish real-engine SQL or concurrent booking guarantees.
 
 Keep the repository's `docs/openapi.yaml` available at runtime: request validation and Swagger UI read it using a path relative to the source files. Run `npm run client:generate` after contract changes to regenerate `docs/api-operations.json`. Deploy the server with its contract, and coordinate schema requirements with the database developer before running real workflows. Online checkout still requires a provider adapter with authenticated confirmations and reconciliation; no client request can settle online money.

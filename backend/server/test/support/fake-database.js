@@ -1,10 +1,18 @@
 // In-memory driver double for HTTP orchestration tests, not an engine emulator.
 // Real SQL execution/concurrency must be tested with the database team's schema.
+import { schema, logicalSql } from './schema.js';
+
 export function fakeDatabase(driver = 'mysql') {
   let tables = {};
   const queries = [];
-  const ids = { CUSTOMER: 'customer_id', USER: 'user_id', VEHICLE: 'vehicle_id', BOOKING: 'booking_id', JOB_CARD: 'job_card_id', TASK: 'task_id', PART: 'part_id', SERVICE_TASK: 'service_task_id', INVOICE: 'invoice_id', INVOICE_LINE: 'line_id', PAYMENT: 'payment_id', AUDIT_EVENT: 'audit_id' };
-  const data = (table) => tables[table] ??= [];
+  const ids = { CUSTOMER: 'customer_id', USER: 'user_id', VEHICLE: 'vehicle_id', BOOKING: 'booking_id', JOB_CARD: 'job_card_id', TASK: 'task_id', PART: 'part_id', SERVICE_TASK: 'service_task_id', INVOICE: 'invoice_id', INVOICE_LINE: 'invoice_line_id', PAYMENT: 'payment_id', AUDIT_EVENT: 'audit_id', IDEMPOTENCY_KEY: 'idempotency_key_id' };
+  const data = (table) => {
+    if (!schema.has(table.toLowerCase())) throw new Error(`Unknown official table: ${table}`);
+    return tables[table] ??= [];
+  };
+  const same = (table, field, left, right) => table === 'IDEMPOTENCY_KEY' && ['key', 'path', 'http_method'].includes(field) && typeof left === 'string' && typeof right === 'string'
+    ? left.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase().trimEnd() === right.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase().trimEnd()
+    : left === right;
   const database = {
     driver, queries,
     rows: data,
@@ -12,15 +20,19 @@ export function fakeDatabase(driver = 'mysql') {
     check: async () => {},
     async query(sql, values = []) {
       queries.push({ sql, values });
-      const plain = sql.replace(/["`]/g, '');
+      const plain = logicalSql(sql);
       const table = plain.match(/(?:FROM|INTO|UPDATE) ([A-Z_]+)/)?.[1];
       if (!table) throw new Error(`Unsupported test query: ${sql}`);
       if (plain.startsWith('INSERT')) {
         const columns = plain.match(/\(([^)]+)\) VALUES/)[1].split(',').map((c) => c.trim());
+        for (const column of columns) if (!schema.get(table.toLowerCase()).has(column)) throw new Error(`Unknown ${table} column: ${column}`);
         const row = Object.fromEntries(columns.map((column, index) => [column, values[index]]));
         const unique = { USER: ['email'], VEHICLE: ['registration_no'], INVOICE: ['job_card_id'], PAYMENT: ['transaction_reference'] }[table];
         if (unique && unique.some((key) => row[key] != null && data(table).some((entry) => entry[key] === row[key]))) {
           throw Object.assign(new Error('secret database constraint details'), { code: driver === 'postgres' ? '23505' : 'ER_DUP_ENTRY' });
+        }
+        if (table === 'IDEMPOTENCY_KEY' && data(table).some((entry) => ['user_id', 'http_method', 'path', 'key'].every((field) => same(table, field, entry[field], row[field])))) {
+          throw Object.assign(new Error('duplicate retry key'), { code: driver === 'postgres' ? '23505' : 'ER_DUP_ENTRY' });
         }
         const idColumn = ids[table];
         if (idColumn) row[idColumn] ??= Math.max(0, ...data(table).map((r) => Number(r[idColumn]))) + 1;
@@ -46,7 +58,7 @@ export function fakeDatabase(driver = 'mysql') {
           tests.push((row) => expected.includes(row[column]));
         } else {
           const expected = operation === '= TRUE' ? true : operation.includes("'") ? operation.slice(3, -1) : values[offset++];
-          tests.push((row) => row[column] === expected || (expected === true && row[column] === 1));
+          tests.push((row) => same(table, column, row[column], expected) || (expected === true && row[column] === 1));
         }
       }
       let selected = data(table).filter((row) => tests.every((predicate) => predicate(row)));

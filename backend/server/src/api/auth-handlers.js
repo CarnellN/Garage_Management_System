@@ -1,6 +1,7 @@
 import { HttpError } from '../errors.js';
 import { hashPassword, verifyPassword, publicUser } from './security.js';
 import { reply, invalid } from './resources.js';
+import { revokeSession } from './sessions.js';
 
 export function authHandlers(database, security) {
   return {
@@ -29,7 +30,7 @@ export function authHandlers(database, security) {
     },
     async getCurrentUser(req) { return reply(publicUser(req.user)); },
     async logout(req, store) {
-      await store.update('AUTH_SESSION', { session_id: req.sessionId, user_id: req.user.user_id }, { revoked_at: new Date() });
+      await revokeSession(store, req.user.user_id, req.sessionId);
       return reply(null, 204);
     },
   };
