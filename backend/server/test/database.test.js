@@ -5,8 +5,8 @@ import { createDatabase } from '../src/database.js';
 function fixture(driver, { failSql, rollbackFails = false, timeout = false } = {}) {
   const calls = [];
   let options;
-  const run = async (target, sql, values) => {
-    calls.push({ target, sql, values });
+  const run = async (target, sql, values, protocol) => {
+    calls.push({ target, sql, values, protocol });
     if (sql === failSql || (rollbackFails && sql === 'ROLLBACK')) {
       const error = new Error('database failure');
       if (timeout && sql === failSql) error.code = 'PROTOCOL_SEQUENCE_TIMEOUT';
@@ -18,8 +18,8 @@ function fixture(driver, { failSql, rollbackFails = false, timeout = false } = {
       : [[{ amount: '12.30' }], []];
   };
   const client = {
-    query: (sql, values) => run('client', sql, values),
-    execute: (spec, values) => run('client', spec.sql, values),
+    query: (sql, values) => run('client', typeof sql === 'string' ? sql : sql.sql, values, 'text'),
+    execute: (spec, values) => run('client', spec.sql, values, 'prepared'),
     release: (discard) => calls.push({ action: 'release', discard }),
     destroy: () => calls.push({ action: 'destroy' }),
   };
@@ -42,9 +42,9 @@ for (const driver of ['postgres', 'mysql']) {
     const sql = { postgres: 'SELECT amount FROM invoice WHERE invoice_id = $1', mysql: 'SELECT amount FROM invoice WHERE invoice_id = ?' };
     const result = await database.query(sql, [input]);
     assert.deepEqual(result, { rows: [{ amount: '12.30' }], rowCount: 1, insertId: null });
-    assert.equal(calls[0].sql, sql[driver]);
-    assert.deepEqual(calls[0].values, [input]);
-    assert.ok(!calls[0].sql.includes(input));
+    const statement = calls.find((call) => call.sql === sql[driver]);
+    assert.deepEqual(statement.values, [input]);
+    assert.ok(!statement.sql.includes(input));
     await database.close();
     assert.equal(calls.at(-1).action, 'close');
   });
@@ -58,7 +58,7 @@ for (const driver of ['postgres', 'mysql']) {
     });
     assert.equal(value, 'saved');
     assert.deepEqual(calls.filter((c) => c.sql).map((c) => c.sql),
-      [driver === 'postgres' ? 'BEGIN' : 'START TRANSACTION', 'SELECT 1', 'COMMIT']);
+      [...(driver === 'postgres' ? ['BEGIN'] : ["SET time_zone = '+00:00'", 'SET TRANSACTION ISOLATION LEVEL SERIALIZABLE', 'START TRANSACTION']), 'SELECT 1', 'COMMIT']);
     assert.ok(calls.filter((c) => c.sql).every((c) => c.target === 'client'));
     assert.deepEqual(calls.at(-1), { action: 'release', discard: driver === 'postgres' ? false : undefined });
   });
@@ -103,4 +103,13 @@ test('MySQL destroys a timed-out connection without returning it to the pool or 
   assert.equal(calls.filter((c) => c.sql === 'UPDATE slow').length, 1);
   assert.equal(calls.filter((c) => c.action === 'destroy').length, 1);
   assert.ok(!calls.some((c) => c.action === 'release'));
+});
+
+test('MySQL uses text protocol for transaction controls and prepared execution for application data', async () => {
+  const { database, calls } = fixture('mysql');
+  await database.transaction((tx) => tx.query('SELECT ?', [1]));
+  const controls = calls.filter((call) => call.sql && /^(SET |START |COMMIT|ROLLBACK)/.test(call.sql));
+  assert.ok(controls.length >= 4);
+  assert.ok(controls.every((call) => call.protocol === 'text'));
+  assert.equal(calls.find((call) => call.sql === 'SELECT ?').protocol, 'prepared');
 });

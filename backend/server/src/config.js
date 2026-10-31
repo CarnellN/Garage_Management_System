@@ -13,7 +13,7 @@ export function loadConfig(env = process.env) {
   if (!['development', 'test', 'production'].includes(nodeEnv)) {
     throw new Error('NODE_ENV must be development, test, or production.');
   }
-  const driver = env.DB_CLIENT ?? 'postgres';
+  const driver = env.DB_CLIENT ?? 'mysql';
   if (!['postgres', 'mysql'].includes(driver)) throw new Error('DB_CLIENT must be postgres or mysql.');
   let databaseUrl;
   try {
@@ -70,8 +70,30 @@ export function loadConfig(env = process.env) {
       throw new Error('CORS_ORIGINS must contain exact HTTP(S) origins without paths or wildcards.');
     }
   }
+  if (env.JWT_SECRET && Buffer.byteLength(env.JWT_SECRET) < 32) throw new Error('JWT_SECRET must contain at least 32 bytes.');
+  if (nodeEnv === 'production' && !env.JWT_SECRET) throw new Error('JWT_SECRET is required in production.');
+  let schedule;
+  if (env.GARAGE_OPEN_TIME || env.GARAGE_CLOSE_TIME || env.GARAGE_OPEN_DAYS) {
+    const time = (value) => {
+      if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(value ?? '')) throw new Error('Configure GARAGE_OPEN_TIME and GARAGE_CLOSE_TIME as HH:MM.');
+      const [hour, minute] = value.split(':').map(Number);
+      return hour * 60 + minute;
+    };
+    const open = time(env.GARAGE_OPEN_TIME), close = time(env.GARAGE_CLOSE_TIME);
+    const daysText = env.GARAGE_OPEN_DAYS ?? '';
+    if (!/^[0-6](,[0-6])*$/.test(daysText) || close <= open) throw new Error('Configure ordered garage hours and GARAGE_OPEN_DAYS as comma-separated weekdays (0=Sunday).');
+    schedule = { open, close, days: [...new Set(daysText.split(',').map(Number))] };
+  }
+  if (env.LABOR_HOURLY_RATE && !/^(0|[1-9][0-9]{0,7})\.[0-9]{2}$/.test(env.LABOR_HOURLY_RATE)) throw new Error('LABOR_HOURLY_RATE must be a nonnegative DECIMAL(10,2) string.');
   return {
     nodeEnv,
+    workflows: { schedule, laborRate: env.LABOR_HOURLY_RATE || undefined },
+    auth: {
+      secret: env.JWT_SECRET,
+      issuer: env.JWT_ISSUER ?? 'garage-management-api',
+      audience: env.JWT_AUDIENCE ?? 'garage-frontend',
+      ttl: boundedInteger(env.JWT_TTL_SECONDS, 900, 'JWT_TTL_SECONDS', 60, 3600),
+    },
     host: env.HOST ?? '127.0.0.1',
     port: boundedInteger(env.PORT, 8000, 'PORT', 1, 65535),
     corsOrigins,

@@ -8,7 +8,7 @@ async function main() {
   let server;
   try {
     await database.check();
-    const app = createApp({ database, corsOrigins: config.corsOrigins });
+    const app = createApp({ database, corsOrigins: config.corsOrigins, auth: config.auth, workflows: config.workflows });
     server = await new Promise((resolve, reject) => {
       const listener = app.listen(config.port, config.host);
       listener.once('error', reject);

@@ -28,5 +28,6 @@ frontend/node_modules/
 # Database
 *.sql.bak
 
+**/certs/
 *.md
 *.pdf

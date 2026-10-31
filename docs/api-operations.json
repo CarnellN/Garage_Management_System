@@ -1,0 +1,316 @@
+{
+  "registerCustomer": {
+    "method": "POST",
+    "path": "/auth/register",
+    "headers": []
+  },
+  "login": {
+    "method": "POST",
+    "path": "/auth/login",
+    "headers": []
+  },
+  "getCurrentUser": {
+    "method": "GET",
+    "path": "/auth/me",
+    "headers": []
+  },
+  "logout": {
+    "method": "POST",
+    "path": "/auth/logout",
+    "headers": []
+  },
+  "listStaffUsers": {
+    "method": "GET",
+    "path": "/users",
+    "headers": []
+  },
+  "createStaffUser": {
+    "method": "POST",
+    "path": "/users",
+    "headers": [
+      "Idempotency-Key"
+    ]
+  },
+  "getStaffUser": {
+    "method": "GET",
+    "path": "/users/{userId}",
+    "headers": []
+  },
+  "updateStaffUser": {
+    "method": "PATCH",
+    "path": "/users/{userId}",
+    "headers": []
+  },
+  "listCustomers": {
+    "method": "GET",
+    "path": "/customers",
+    "headers": []
+  },
+  "createCustomer": {
+    "method": "POST",
+    "path": "/customers",
+    "headers": [
+      "Idempotency-Key"
+    ]
+  },
+  "getCustomer": {
+    "method": "GET",
+    "path": "/customers/{customerId}",
+    "headers": []
+  },
+  "updateCustomer": {
+    "method": "PATCH",
+    "path": "/customers/{customerId}",
+    "headers": []
+  },
+  "listVehicles": {
+    "method": "GET",
+    "path": "/vehicles",
+    "headers": []
+  },
+  "createVehicle": {
+    "method": "POST",
+    "path": "/vehicles",
+    "headers": [
+      "Idempotency-Key"
+    ]
+  },
+  "getVehicle": {
+    "method": "GET",
+    "path": "/vehicles/{vehicleId}",
+    "headers": []
+  },
+  "updateVehicle": {
+    "method": "PATCH",
+    "path": "/vehicles/{vehicleId}",
+    "headers": []
+  },
+  "deleteVehicle": {
+    "method": "DELETE",
+    "path": "/vehicles/{vehicleId}",
+    "headers": []
+  },
+  "listAvailability": {
+    "method": "GET",
+    "path": "/bookings/availability",
+    "headers": []
+  },
+  "listBookings": {
+    "method": "GET",
+    "path": "/bookings",
+    "headers": []
+  },
+  "createBooking": {
+    "method": "POST",
+    "path": "/bookings",
+    "headers": [
+      "Idempotency-Key"
+    ]
+  },
+  "getBooking": {
+    "method": "GET",
+    "path": "/bookings/{bookingId}",
+    "headers": []
+  },
+  "rescheduleBooking": {
+    "method": "PATCH",
+    "path": "/bookings/{bookingId}",
+    "headers": [
+      "If-Match"
+    ]
+  },
+  "updateBookingStatus": {
+    "method": "PATCH",
+    "path": "/bookings/{bookingId}/status",
+    "headers": [
+      "If-Match"
+    ]
+  },
+  "listJobCards": {
+    "method": "GET",
+    "path": "/job-cards",
+    "headers": []
+  },
+  "createJobCard": {
+    "method": "POST",
+    "path": "/job-cards",
+    "headers": [
+      "Idempotency-Key"
+    ]
+  },
+  "getJobCard": {
+    "method": "GET",
+    "path": "/job-cards/{jobCardId}",
+    "headers": []
+  },
+  "assignMechanic": {
+    "method": "PATCH",
+    "path": "/job-cards/{jobCardId}/assignment",
+    "headers": [
+      "If-Match"
+    ]
+  },
+  "updateJobCardStatus": {
+    "method": "PATCH",
+    "path": "/job-cards/{jobCardId}/status",
+    "headers": [
+      "If-Match"
+    ]
+  },
+  "listJobTasks": {
+    "method": "GET",
+    "path": "/job-cards/{jobCardId}/tasks",
+    "headers": []
+  },
+  "createJobTask": {
+    "method": "POST",
+    "path": "/job-cards/{jobCardId}/tasks",
+    "headers": [
+      "Idempotency-Key",
+      "If-Match"
+    ]
+  },
+  "getJobTask": {
+    "method": "GET",
+    "path": "/job-cards/{jobCardId}/tasks/{taskId}",
+    "headers": []
+  },
+  "updateJobTask": {
+    "method": "PATCH",
+    "path": "/job-cards/{jobCardId}/tasks/{taskId}",
+    "headers": [
+      "If-Match"
+    ]
+  },
+  "deleteJobTask": {
+    "method": "DELETE",
+    "path": "/job-cards/{jobCardId}/tasks/{taskId}",
+    "headers": [
+      "If-Match"
+    ]
+  },
+  "listJobParts": {
+    "method": "GET",
+    "path": "/job-cards/{jobCardId}/parts",
+    "headers": []
+  },
+  "setJobPartQuantity": {
+    "method": "PUT",
+    "path": "/job-cards/{jobCardId}/parts/{partId}",
+    "headers": [
+      "If-Match"
+    ]
+  },
+  "removeJobPart": {
+    "method": "DELETE",
+    "path": "/job-cards/{jobCardId}/parts/{partId}",
+    "headers": [
+      "If-Match"
+    ]
+  },
+  "listParts": {
+    "method": "GET",
+    "path": "/parts",
+    "headers": []
+  },
+  "createPart": {
+    "method": "POST",
+    "path": "/parts",
+    "headers": [
+      "Idempotency-Key"
+    ]
+  },
+  "getPart": {
+    "method": "GET",
+    "path": "/parts/{partId}",
+    "headers": []
+  },
+  "updatePart": {
+    "method": "PATCH",
+    "path": "/parts/{partId}",
+    "headers": []
+  },
+  "deletePart": {
+    "method": "DELETE",
+    "path": "/parts/{partId}",
+    "headers": []
+  },
+  "listServiceTasks": {
+    "method": "GET",
+    "path": "/service-tasks",
+    "headers": []
+  },
+  "createServiceTask": {
+    "method": "POST",
+    "path": "/service-tasks",
+    "headers": [
+      "Idempotency-Key"
+    ]
+  },
+  "getServiceTask": {
+    "method": "GET",
+    "path": "/service-tasks/{serviceTaskId}",
+    "headers": []
+  },
+  "updateServiceTask": {
+    "method": "PATCH",
+    "path": "/service-tasks/{serviceTaskId}",
+    "headers": []
+  },
+  "deleteServiceTask": {
+    "method": "DELETE",
+    "path": "/service-tasks/{serviceTaskId}",
+    "headers": []
+  },
+  "listInvoices": {
+    "method": "GET",
+    "path": "/invoices",
+    "headers": []
+  },
+  "createInvoice": {
+    "method": "POST",
+    "path": "/invoices",
+    "headers": [
+      "Idempotency-Key"
+    ]
+  },
+  "getInvoice": {
+    "method": "GET",
+    "path": "/invoices/{invoiceId}",
+    "headers": []
+  },
+  "listInvoicePayments": {
+    "method": "GET",
+    "path": "/invoices/{invoiceId}/payments",
+    "headers": []
+  },
+  "recordPayment": {
+    "method": "POST",
+    "path": "/invoices/{invoiceId}/payments",
+    "headers": [
+      "Idempotency-Key"
+    ]
+  },
+  "createPaymentIntent": {
+    "method": "POST",
+    "path": "/invoices/{invoiceId}/payment-intents",
+    "headers": [
+      "Idempotency-Key"
+    ]
+  },
+  "getPaymentIntent": {
+    "method": "GET",
+    "path": "/payment-intents/{paymentIntentId}",
+    "headers": []
+  },
+  "getPayment": {
+    "method": "GET",
+    "path": "/payments/{paymentId}",
+    "headers": []
+  },
+  "listAuditEvents": {
+    "method": "GET",
+    "path": "/audit-events",
+    "headers": []
+  }
+}

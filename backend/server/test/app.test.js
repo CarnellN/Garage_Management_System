@@ -56,11 +56,14 @@ test('CORS preflight permits configured origins and required contract headers', 
   const denied = await fetch(`${url}/health`, { headers: { Origin: 'https://untrusted.example' } });
   assert.equal(denied.status, 403);
   assert.equal(denied.headers.get('access-control-allow-origin'), null);
+  const sameOrigin = await fetch(`${url}/health`, { headers: { Origin: url } });
+  assert.equal(sameOrigin.status, 200);
+  assert.equal(sameOrigin.headers.get('access-control-allow-origin'), url);
 });
 
 test('unknown endpoints and malformed JSON follow the contract error envelope', async (t) => {
   const url = await serve(t);
-  const missing = await fetch(`${url}/api/v1/customers`);
+  const missing = await fetch(`${url}/api/v1/unknown-resource`);
   assert.equal(missing.status, 404);
   assert.equal((await missing.json()).code, 'NOT_FOUND');
   const malformed = await fetch(`${url}/api/v1/customers`, {
