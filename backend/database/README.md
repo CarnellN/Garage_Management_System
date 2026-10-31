@@ -9,7 +9,7 @@ MySQL 8.0.16+ schema for the Garage Management System. All tables use InnoDB wit
 mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS garage_management_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 
 # 2. Apply the schema
-mysql -u root -p -e "source backend/database/schema.sql";
+mysql -u root -p garage_management_db < backend/database/schema.sql
 
 # 3. Load seed data (development only)
 mysql -u root -p -e "source backend/database/schema.sql";
