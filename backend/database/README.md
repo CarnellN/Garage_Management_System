@@ -12,7 +12,7 @@ mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS garage_management_db CHARACTE
 mysql -u root -p garage_management_db < backend/database/schema.sql
 
 # 3. Load seed data (development only)
-mysql -u root -p -e "source backend/database/schema.sql";
+mysql -u root -p garage_management_db < backend/database/seed.sql
 ```
 
 Change `root` to your username and add `-P {your-port number}` after `-p` if your MySQL server is on a different port
