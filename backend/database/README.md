@@ -5,7 +5,7 @@ MySQL 8.0.16+ schema for the Garage Management System. All tables use InnoDB wit
 ## Quick start
 
 ```powershell
-# 1. Create the database and application user (run as MySQL root)
+# 1. Create the database (run as MySQL root)
 mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS garage_management_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 
 # 2. Apply the schema
@@ -18,7 +18,7 @@ mysql -u root -p garage_management_db < backend/database/seed.sql
 Change `root` to your username and add `-P {your-port number}` after `-p` if your MySQL server is on a different port
 
 > [!IMPORTANT]
-> Create a dedicated least-privilege application user for the Express server. Do not use `root` in the `DATABASE_URL` environment variable.
+> Create a dedicated least-privilege application user for the Express server before running the app. Do not use `root` in the `DATABASE_URL` environment variable.
 
 ## Files
 
