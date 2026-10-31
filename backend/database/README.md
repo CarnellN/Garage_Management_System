@@ -9,42 +9,44 @@ MySQL 8.0.16+ schema for the Garage Management System. All tables use InnoDB wit
 mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS garage_management_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 
 # 2. Apply the schema
-mysql -u root -p garage_management_db < backend/database/schema.sql
+mysql -u root -p -e "source backend/database/schema.sql";
 
 # 3. Load seed data (development only)
-mysql -u root -p garage_management_db < backend/database/seed.sql
+mysql -u root -p -e "source backend/database/schema.sql";
 ```
+
+Change `root` to your username and add `-P {your-port number}` after `-p` if your MySQL server is on a different port
 
 > [!IMPORTANT]
 > Create a dedicated least-privilege application user for the Express server. Do not use `root` in the `DATABASE_URL` environment variable.
 
 ## Files
 
-| File | Purpose |
-| --- | --- |
+| File         | Purpose                                                          |
+| ------------ | ---------------------------------------------------------------- |
 | `schema.sql` | Creates all 16 tables with constraints, indexes and foreign keys |
-| `seed.sql` | Inserts realistic sample data for development and demos |
+| `seed.sql`   | Inserts realistic sample data for development and demos          |
 
 ## Tables (16)
 
-| # | Table | Description |
-| --- | --- | --- |
-| 1 | `customer` | Customer contact profiles |
-| 2 | `user` | Login accounts with hashed passwords and role-based access |
-| 3 | `vehicle` | Customer vehicles (registration, make, model, year, mileage) |
-| 4 | `bay` | Service bays for scheduling and capacity management |
-| 5 | `booking` | Service appointments with time interval and bay assignment |
-| 6 | `job_card` | Work orders created from bookings or walk-ins |
-| 7 | `service_task` | Reusable task templates (service catalogue) |
-| 8 | `task` | Actual tasks performed on a specific job card |
-| 9 | `part` | Parts catalogue with current unit prices |
-| 10 | `job_part` | Junction table: parts consumed on a job card (price snapshot) |
-| 11 | `invoice` | Invoice header, one per job card |
-| 12 | `invoice_line` | Immutable line-item snapshots (labour and parts) |
-| 13 | `payment` | Payment records against invoices |
-| 14 | `payment_intent` | Durable payment initiation records (M-Pesa, card, etc.) |
-| 15 | `audit_event` | Append-only audit trail for all critical actions |
-| 16 | `idempotency_key` | Prevents duplicate mutation requests |
+| #   | Table             | Description                                                   |
+| --- | ----------------- | ------------------------------------------------------------- |
+| 1   | `customer`        | Customer contact profiles                                     |
+| 2   | `user`            | Login accounts with hashed passwords and role-based access    |
+| 3   | `vehicle`         | Customer vehicles (registration, make, model, year, mileage)  |
+| 4   | `bay`             | Service bays for scheduling and capacity management           |
+| 5   | `booking`         | Service appointments with time interval and bay assignment    |
+| 6   | `job_card`        | Work orders created from bookings or walk-ins                 |
+| 7   | `service_task`    | Reusable task templates (service catalogue)                   |
+| 8   | `task`            | Actual tasks performed on a specific job card                 |
+| 9   | `part`            | Parts catalogue with current unit prices                      |
+| 10  | `job_part`        | Junction table: parts consumed on a job card (price snapshot) |
+| 11  | `invoice`         | Invoice header, one per job card                              |
+| 12  | `invoice_line`    | Immutable line-item snapshots (labour and parts)              |
+| 13  | `payment`         | Payment records against invoices                              |
+| 14  | `payment_intent`  | Durable payment initiation records (M-Pesa, card, etc.)       |
+| 15  | `audit_event`     | Append-only audit trail for all critical actions              |
+| 16  | `idempotency_key` | Prevents duplicate mutation requests                          |
 
 ## Key relationships
 
@@ -73,26 +75,26 @@ user      1──M  audit_event   (as actor)
 
 ## ENUMs
 
-| Column | Values |
-| --- | --- |
-| `user.role` | `CUSTOMER`, `RECEPTIONIST`, `MECHANIC`, `ADMIN` |
-| `booking.status` | `PENDING`, `CONFIRMED`, `CHECKED_IN`, `COMPLETED`, `CANCELLED`, `NO_SHOW` |
-| `job_card.status` | `OPEN`, `IN_PROGRESS`, `AWAITING_PARTS`, `COMPLETED`, `CLOSED`, `CANCELLED` |
-| `invoice_line.kind` | `LABOR`, `PART` |
-| `payment.method` | `CASH`, `CARD`, `MOBILE_MONEY`, `BANK_TRANSFER` |
-| `payment_intent.status` | `PENDING`, `SUCCEEDED`, `FAILED`, `EXPIRED` |
-| `audit_event.outcome` | `SUCCESS`, `DENIED`, `FAILURE` |
+| Column                  | Values                                                                      |
+| ----------------------- | --------------------------------------------------------------------------- |
+| `user.role`             | `CUSTOMER`, `RECEPTIONIST`, `MECHANIC`, `ADMIN`                             |
+| `booking.status`        | `PENDING`, `CONFIRMED`, `CHECKED_IN`, `COMPLETED`, `CANCELLED`, `NO_SHOW`   |
+| `job_card.status`       | `OPEN`, `IN_PROGRESS`, `AWAITING_PARTS`, `COMPLETED`, `CLOSED`, `CANCELLED` |
+| `invoice_line.kind`     | `LABOR`, `PART`                                                             |
+| `payment.method`        | `CASH`, `CARD`, `MOBILE_MONEY`, `BANK_TRANSFER`                             |
+| `payment_intent.status` | `PENDING`, `SUCCEEDED`, `FAILED`, `EXPIRED`                                 |
+| `audit_event.outcome`   | `SUCCESS`, `DENIED`, `FAILURE`                                              |
 
 ## Seed data credentials
 
 All seeded user accounts use the password **`Password123!`** (bcrypt hash). Replace the hash if your server uses Argon2id or a different algorithm.
 
-| Email | Role |
-| --- | --- |
-| `james.mwangi@example.com` | Customer |
-| `aisha.odhiambo@example.com` | Customer |
-| `peter.kamau@example.com` | Customer |
-| `sarah.njeri@garage.local` | Admin |
+| Email                        | Role         |
+| ---------------------------- | ------------ |
+| `james.mwangi@example.com`   | Customer     |
+| `aisha.odhiambo@example.com` | Customer     |
+| `peter.kamau@example.com`    | Customer     |
+| `sarah.njeri@garage.local`   | Admin        |
 | `john.kipchoge@garage.local` | Receptionist |
-| `david.maina@garage.local` | Mechanic |
-| `michael.ouma@garage.local` | Mechanic |
+| `david.maina@garage.local`   | Mechanic     |
+| `michael.ouma@garage.local`  | Mechanic     |
