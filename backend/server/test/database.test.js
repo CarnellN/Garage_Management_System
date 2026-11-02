@@ -35,7 +35,7 @@ function fixture(driver, { failSql, rollbackFails = false, timeout = false } = {
   return { database, calls, options };
 }
 
-for (const driver of ['postgres', 'mysql']) {
+for (const driver of ['mysql']) {
   test(`${driver}: chooses native SQL, keeps values separate, and normalizes rows`, async () => {
     const { database, calls } = fixture(driver);
     const input = "x'; DROP TABLE customer; --";

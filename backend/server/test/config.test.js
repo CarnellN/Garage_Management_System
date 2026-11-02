@@ -34,18 +34,24 @@ test('production requires an explicit frontend origin allowlist', () => {
     ['https://garage.example.com']);
 });
 
-test('MySQL is the default; Postgres remains an explicitly selected backup', () => {
+test('MySQL is the only supported database', () => {
   assert.equal(loadConfig(env).database.driver, 'mysql');
   const postgres = { DB_CLIENT: 'postgres', DATABASE_URL: 'postgresql://garage:password@db.example.com:5432/postgres' };
-  assert.equal(loadConfig(postgres).database.driver, 'postgres');
-  assert.throws(() => loadConfig({ DATABASE_URL: postgres.DATABASE_URL }));
+  assert.throws(() => loadConfig(postgres));
   const mysql = { DB_CLIENT: 'mysql', DATABASE_URL: 'mysql://garage:password@localhost:3306/garage_management_db', DB_SSL: 'false' };
   assert.equal(loadConfig(mysql).database.driver, 'mysql');
   assert.throws(() => loadConfig({ ...env, DB_CLIENT: 'sqlite' }));
-  assert.throws(() => loadConfig({ ...env, DB_CLIENT: 'postgres' }));
-  assert.throws(() => loadConfig({ ...mysql, DB_CLIENT: 'postgres' }));
   assert.throws(() => loadConfig({ ...mysql, DATABASE_URL: `${mysql.DATABASE_URL}?multipleStatements=true` }));
   assert.throws(() => loadConfig({ ...mysql, DATABASE_URL: 'mysql://garage:%XX@localhost/garage' }));
+});
+
+test('Aiven connection fields build an encoded MySQL URI and load a PEM CA', () => {
+  const config = loadConfig({ DB_HOST: 'mysql.example.aivencloud.com', DB_USER: 'garage user', DB_PASSWORD: 'p@ss/word', DB_NAME: 'garage db', DB_PORT: '12345', DB_SSL: 'true', DB_CA: '-----BEGIN CERTIFICATE-----\nabc\n-----END CERTIFICATE-----' });
+  const url = new URL(config.database.connectionString);
+  assert.equal(url.username, 'garage%20user');
+  assert.equal(url.password, 'p%40ss%2Fword');
+  assert.equal(decodeURIComponent(url.pathname.slice(1)), 'garage db');
+  assert.equal(config.database.ssl.ca, '-----BEGIN CERTIFICATE-----\nabc\n-----END CERTIFICATE-----');
 });
 
 test('remote MySQL requires verified TLS, including in development', () => {

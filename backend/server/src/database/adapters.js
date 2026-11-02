@@ -1,36 +1,9 @@
-import pg from 'pg';
 import mysql from 'mysql2/promise';
 
 function statement(sql, driver) {
   const text = typeof sql === 'string' ? sql : sql?.[driver];
   if (typeof text !== 'string' || !text.trim()) throw new Error(`A SQL statement for ${driver} is required.`);
   return text;
-}
-
-export function postgresAdapter(config, logger, createPool = (options) => new pg.Pool(options)) {
-  const pool = createPool({
-    connectionString: config.connectionString, max: config.max, ssl: config.ssl,
-    application_name: 'garage-management-api', connectionTimeoutMillis: 5000,
-    idleTimeoutMillis: 30000, statement_timeout: 5000, query_timeout: 6000,
-    idle_in_transaction_session_timeout: 10000, allowExitOnIdle: true,
-  });
-  pool.on('error', () => logger.error({ event: 'database_pool_error' }));
-  const query = async (target, sql, values) => {
-    const result = await target.query(statement(sql, 'postgres'), values);
-    return { rows: result.rows, rowCount: result.rowCount, insertId: null };
-  };
-  return {
-    query: (sql, values) => query(pool, sql, values),
-    async acquire() {
-      const client = await pool.connect();
-      return {
-        query: (sql, values) => query(client, sql, values),
-        begin: () => client.query('BEGIN'), commit: () => client.query('COMMIT'),
-        rollback: () => client.query('ROLLBACK'), release: (discard) => client.release(discard),
-      };
-    },
-    close: () => pool.end(),
-  };
 }
 
 export function mysqlAdapter(config, createPool = (options) => mysql.createPool(options)) {
