@@ -30,7 +30,7 @@ With Docker Desktop running, execute `npm.cmd run test:mysql` from `backend/serv
 
 The harness does not load `.env` or use your configured DATABASE_URL. It uses a unique container name, a random loopback-only port, test-only credentials and a temporary in-memory database volume. It closes the HTTP server/pool and stops/removes its own labeled container on completion or test failure. The Docker image is cached locally for subsequent runs. First use may download the image; allow a few minutes and Docker access on Windows. Do not run this command as a production database smoke test.
 
-Verified on 29 October 2026 with MySQL 8.0.46: all eight integration scenarios passed, exercising all 55 operation routes. The 51 unit/API tests also passed. These targeted competing-request checks do not replace production-load/performance testing or verification of the deployment's own database configuration. PostgreSQL has not been verified against a real engine by this suite.
+Verified on 29 October 2026 with MySQL 8.0.46: all eight integration scenarios passed, exercising all 55 operation routes. The 51 unit/API tests also passed. These targeted competing-request checks do not replace production-load/performance testing or verification of the deployment's own database configuration.
 
 MySQL connection/transaction setup commands use the text protocol because SET TRANSACTION is unsupported by MySQL's prepared-statement protocol. Application data statements continue using prepared execution with bound values. Unit tests cover this distinction to prevent regressions.
 
@@ -78,7 +78,7 @@ MySQL uses prepared execution and disables multiple statements. Exact DECIMAL an
 
 Use `database.transaction(async (tx) => { ... })` for atomic work; every statement in the callback must use `tx.query`, which has the same dialect selection and result format. Do not nest transactions or issue transaction-control SQL manually. Use InnoDB for all MySQL business tables. Failed work rolls back and releases the connection; rollback failure discards it. Avoid external network calls inside transactions. There is no automatic mutation retry, including timeouts or uncertain commit outcomes.
 
-Connections have a 5-second establishment timeout and queries a 6-second client timeout. PostgreSQL also has a 5-second server statement timeout. MySQL fails immediately if the pool is at capacity and destroys timed-out connections; no unbounded pool wait queue is used. A client timeout does not prove a write failed: reconcile through workflow idempotency before retrying.
+Connections have a 5-second establishment timeout and queries a 6-second client timeout. MySQL fails immediately if the pool is at capacity and destroys timed-out connections; no unbounded pool wait queue is used. A client timeout does not prove a write failed: reconcile through workflow idempotency before retrying.
 
 The official schema uses lowercase names (including singular `job_part`), `invoice_line_id`, and DATETIME(0). Booking writes require whole seconds; MySQL session timestamps are UTC. MySQL transactions explicitly use SERIALIZABLE. MySQL must lock the relevant bay/vehicle rows in a consistent order and recheck overlap inside the reservation transaction. Verify those invariants under concurrency against the provisioned database before enabling workflows. The current test suite checks schema identifiers, HTTP workflows and boundary rules; it does not establish real-engine SQL or concurrent booking guarantees.
 

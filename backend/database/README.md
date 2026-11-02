@@ -2,7 +2,7 @@
 
 [schema.sql](schema.sql) is the database developer's supplied MySQL 8.0.16+ / InnoDB schema, preserved unchanged as the integration reference. The database developer owns provisioning, migrations and seed data. The server never executes this file or creates tables at startup.
 
-The server quotes the official lowercase names: `customer`, `user`, `vehicle`, `bay`, `booking`, `job_card`, `service_task`, `task`, `part`, `job_part`, `invoice`, `invoice_line`, `payment`, `payment_intent`, `audit_event`, and `idempotency_key`. In particular, part usage is singular `job_part`, and invoice lines use `invoice_line_id`. PostgreSQL support expects equivalent lowercase tables and matching columns; the supplied MySQL DDL itself is not PostgreSQL-compatible.
+The server quotes the official lowercase names: `customer`, `user`, `vehicle`, `bay`, `booking`, `job_card`, `service_task`, `task`, `part`, `job_part`, `invoice`, `invoice_line`, `payment`, `payment_intent`, `audit_event`, and `idempotency_key`. In particular, part usage is singular `job_part`, and invoice lines use `invoice_line_id`.
 
 ## Server mapping
 
