@@ -14,14 +14,22 @@ export function loadConfig(env = process.env) {
     throw new Error('NODE_ENV must be development, test, or production.');
   }
   const driver = env.DB_CLIENT ?? 'mysql';
-  if (!['postgres', 'mysql'].includes(driver)) throw new Error('DB_CLIENT must be postgres or mysql.');
+  if (driver !== 'mysql') throw new Error('Only MySQL is supported.');
+  let connectionString = env.DATABASE_URL;
+  if (!connectionString && env.DB_HOST) {
+    const port = boundedInteger(env.DB_PORT, 3306, 'DB_PORT', 1, 65535);
+    if (!env.DB_USER || !env.DB_PASSWORD || !env.DB_NAME) {
+      throw new Error('Set DB_USER, DB_PASSWORD, and DB_NAME with DB_HOST.');
+    }
+    connectionString = `mysql://${encodeURIComponent(env.DB_USER)}:${encodeURIComponent(env.DB_PASSWORD)}@${env.DB_HOST}:${port}/${encodeURIComponent(env.DB_NAME)}`;
+  }
   let databaseUrl;
   try {
-    databaseUrl = new URL(env.DATABASE_URL);
+    databaseUrl = new URL(connectionString);
   } catch {
     throw new Error('DATABASE_URL must be a valid database connection URI.');
   }
-  const protocols = driver === 'postgres' ? ['postgres:', 'postgresql:'] : ['mysql:'];
+  const protocols = ['mysql:'];
   if (!protocols.includes(databaseUrl.protocol) ||
       !databaseUrl.hostname || databaseUrl.pathname.length < 2 ||
       !databaseUrl.username || !databaseUrl.password) {
@@ -37,7 +45,6 @@ export function loadConfig(env = process.env) {
   } catch {
     throw new Error('DATABASE_URL contains invalid percent-encoding.');
   }
-  // pg connection-string SSL options can override the explicit verified TLS config.
   if ([...databaseUrl.searchParams.keys()].some((key) => key.toLowerCase().startsWith('ssl'))) {
     throw new Error('Remove SSL query parameters from DATABASE_URL; use DB_SSL and DB_SSL_CA_FILE.');
   }
@@ -51,12 +58,16 @@ export function loadConfig(env = process.env) {
     throw new Error('DB_SSL=false is allowed only for a local development/test database.');
   }
   let ca;
-  if (env.DB_SSL_CA_FILE?.trim()) {
+  const caFile = env.DB_SSL_CA_FILE?.trim();
+  const caText = env.DB_CA?.trim();
+  if (caFile) {
     try {
-      ca = readFileSync(env.DB_SSL_CA_FILE.trim(), 'utf8');
+      ca = readFileSync(caFile, 'utf8');
     } catch {
       throw new Error('DB_SSL_CA_FILE could not be read.');
     }
+  } else if (caText) {
+    ca = caText;
   }
   const corsOrigins = (env.CORS_ORIGINS ?? (nodeEnv === 'production' ? '' : 'http://localhost:5173'))
     .split(',').map((origin) => origin.trim()).filter(Boolean);
@@ -99,7 +110,7 @@ export function loadConfig(env = process.env) {
     corsOrigins,
     database: {
       driver,
-      connectionString: env.DATABASE_URL,
+      connectionString,
       max: boundedInteger(env.DB_POOL_MAX, 5, 'DB_POOL_MAX', 1, 50),
       ssl: sslEnabled ? { rejectUnauthorized: true, ...(ca ? { ca } : {}) } : false,
     },

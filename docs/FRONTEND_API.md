@@ -1,6 +1,6 @@
 # Frontend API integration
 
-Server source: `backend/server`. Start it from that directory with `npm run dev`. Default API base URL: `http://localhost:8000/api/v1`. Configure `CORS_ORIGINS` for the frontend's exact origin. MySQL is the default; Supabase/PostgreSQL is selectable with `DB_CLIENT=postgres`.
+Server source: `backend/server`. Start it from that directory with `npm run dev`. Default API base URL: `http://localhost:8000/api/v1`. Configure `CORS_ORIGINS` for the frontend's exact origin. MySQL is the supported database; the server reads connection settings from `.env.local`.
 
 While the server is running:
 

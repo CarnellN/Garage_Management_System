@@ -1,14 +1,12 @@
-import { postgresAdapter, mysqlAdapter } from './database/adapters.js';
+import { mysqlAdapter } from './database/adapters.js';
 
 export function createDatabase(config, logger = console, factories = {}) {
   const driver = config.driver ?? 'mysql';
-  if (!['postgres', 'mysql'].includes(driver)) throw new Error('Unsupported database driver.');
-  const adapter = driver === 'postgres'
-    ? postgresAdapter(config, logger, factories.postgres)
-    : mysqlAdapter(config, factories.mysql);
+  if (driver !== 'mysql') throw new Error('Unsupported database driver.');
+  const adapter = mysqlAdapter(config, factories.mysql);
   return {
     driver,
-    // Native placeholders, or { postgres: '... $1', mysql: '... ?' }. Never rewrite SQL by regex.
+    // MySQL placeholders are supplied by repositories. Never rewrite SQL by regex.
     query: (sql, values = []) => adapter.query(sql, values),
     async check() {
       await adapter.query('SELECT 1', []);
