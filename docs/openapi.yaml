@@ -17,7 +17,7 @@ info:
 
     Reliability/usability targets: with a production-sized dataset at the agreed deployment load (baseline: 100 concurrent active users), p95 API response time is <= 1000 ms excluding external payment-provider time, and p95 primary page load is < 3 seconds on a documented representative mobile network. Verify with load tests and real browser measurements; the contract does not implement these guarantees. Use pagination, indexed foreign keys/date filters and bounded queries. Frontend acceptance requires responsive layouts at 360px and desktop widths, labeled accessible controls, clear field errors, loading indicators and confirmation of payments/bookings. Monitor error rate and latency; transactions must roll back fully on failure.
 
-    Business scope: no tax, discounts, refunds, stock inventory or account recovery in v1. Record only parts consumed, not warehouse stock. No hard deletion of users, customers, bookings, job cards, invoices or payments. Profiles created by receptionists have no login until a separately verified linking process is implemented. API credential provisioning/bootstrap of the first admin is an out-of-band deployment operation. Payment providers and their authenticated callback/reconciliation adapters must be selected during implementation; a client request alone never proves payment.
+    Business scope: no tax, discounts, refunds or stock inventory in v1. Account recovery uses emailed single-use reset tokens; optional TOTP two-factor authentication protects logins. Record only parts consumed, not warehouse stock. No hard deletion of users, customers, bookings, job cards, invoices or payments. Profiles created by receptionists have no login until a separately verified linking process is implemented. API credential provisioning/bootstrap of the first admin is an out-of-band deployment operation. Online checkout uses M-Pesa (Safaricom Daraja STK push); results are settled only after a server-to-server status query, never on a client request alone. Reports are available as PDF or JSON under /reports.
   x-database-name: "garage_management_db"
 servers:
   -
@@ -56,6 +56,8 @@ tags:
     name: "Payments"
   -
     name: "Audit"
+  -
+    name: "Reports"
 security:
   -
     bearerAuth: []
@@ -3245,7 +3247,7 @@ paths:
         - "Payments"
       operationId: "createPaymentIntent"
       summary: "Start an online payment"
-      description: "Customers may access only their linked profile and resources reached through that profile. Receptionist and admin may access all customer resources. Out-of-scope identifiers return 404. Creates a pending provider checkout, never a settled PAYMENT. Atomically reserve amount against invoice balance (including other pending reservations); reject overpayment with 409. Provider confirmation must be authenticated and verified server-to-server, deduplicated by provider transaction ID, and atomically insert exactly one PAYMENT and mark intent SUCCEEDED. FAILED/EXPIRED intents release reservations. Expiry/callback races must reconcile before release; never drop a verified charge. No public callback endpoint is specified; the provider adapter is deployment-specific."
+      description: "Customers may access only their linked profile and resources reached through that profile. Receptionist and admin may access all customer resources. Out-of-scope identifiers return 404. Creates a pending provider checkout, never a settled PAYMENT. Atomically reserve amount against invoice balance (including other pending reservations); reject overpayment with 409. Provider confirmation must be authenticated and verified server-to-server, deduplicated by provider transaction ID, and atomically insert exactly one PAYMENT and mark intent SUCCEEDED. FAILED/EXPIRED intents release reservations. Expiry/callback races must reconcile before release; never drop a verified charge. M-Pesa (MOBILE_MONEY) is the supported provider: the reservation commits first, then the customer's phone receives an STK prompt. Safaricom's callback is accepted on a secret, deployment-configured URL outside this contract and is verified with an STK status query before settlement; refreshPaymentIntent performs the same query on demand. Returns 503 PAYMENT_PROVIDER_NOT_CONFIGURED when M-Pesa credentials are not configured and 502 PAYMENT_PROVIDER_ERROR when the prompt could not be sent."
       x-roles:
         - "CUSTOMER"
         - "RECEPTIONIST"
@@ -3506,6 +3508,799 @@ paths:
           "$ref": "#/components/parameters/Page"
         -
           "$ref": "#/components/parameters/PageSize"
+  /auth/password/forgot:
+    post:
+      tags:
+      - Authentication
+      operationId: requestPasswordReset
+      summary: Request a password reset email
+      description: Public and rate-limited. Always returns 202 with the same message whether or not the email belongs to an active account. When it does, a single-use link valid for 30 minutes is emailed (or written to the server log in development when SMTP is not configured). Earlier unused links for that account stop working.
+      x-roles: []
+      responses:
+        '202':
+          description: Accepted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Message'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordResetRequest'
+  /auth/password/reset:
+    post:
+      tags:
+      - Authentication
+      operationId: resetPassword
+      summary: Choose a new password with a reset token
+      description: Public and rate-limited. Consumes the emailed token once, stores a new salted scrypt hash and signs the account out everywhere. Invalid, used or expired tokens return 400 INVALID_RESET_TOKEN.
+      x-roles: []
+      responses:
+        '204':
+          description: Password changed; log in again.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordReset'
+  /auth/password/change:
+    post:
+      tags:
+      - Authentication
+      operationId: changePassword
+      summary: Change your password
+      description: Requires the current password. All sessions, including the current one, are revoked; log in again with the new password.
+      x-roles: &id001
+      - CUSTOMER
+      - RECEPTIONIST
+      - MECHANIC
+      - ADMIN
+      responses:
+        '204':
+          description: Password changed; log in again.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordChange'
+  /auth/mfa:
+    get:
+      tags:
+      - Authentication
+      operationId: getMfaStatus
+      summary: Check whether two-factor authentication is on
+      description: Returns whether the signed-in account requires a one-time code at login.
+      x-roles: *id001
+      responses:
+        '200':
+          description: Successful response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MfaStatus'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /auth/mfa/setup:
+    post:
+      tags:
+      - Authentication
+      operationId: setupMfa
+      summary: Start two-factor enrolment
+      description: Creates a new TOTP secret (encrypted at rest with AES-256-GCM) and returns it once with an otpauth:// URI for Google Authenticator, Microsoft Authenticator or similar apps. Two-factor stays off until enableMfa confirms a code.
+      x-roles: *id001
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MfaSetup'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /auth/mfa/enable:
+    post:
+      tags:
+      - Authentication
+      operationId: enableMfa
+      summary: Confirm a code and turn on two-factor authentication
+      description: After this, login requires the otp field.
+      x-roles: *id001
+      responses:
+        '200':
+          description: Successful response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MfaStatus'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MfaCode'
+  /auth/mfa/disable:
+    post:
+      tags:
+      - Authentication
+      operationId: disableMfa
+      summary: Turn off two-factor authentication
+      description: Requires the account password and a current code.
+      x-roles: *id001
+      responses:
+        '200':
+          description: Successful response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MfaStatus'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MfaDisable'
+  /users/{userId}/mfa/reset:
+    post:
+      tags:
+      - Users
+      operationId: resetUserMfa
+      summary: Remove a user's two-factor device
+      description: Admin recovery for a lost phone. Removes the enrolment and signs the user out everywhere.
+      x-roles:
+      - ADMIN
+      responses:
+        '200':
+          description: Successful response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MfaStatus'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      parameters:
+      - name: userId
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int32
+          minimum: 1
+  /payment-intents/{paymentIntentId}/refresh:
+    post:
+      tags:
+      - Payments
+      operationId: refreshPaymentIntent
+      summary: Ask M-Pesa for the latest payment result
+      description: For a PENDING M-Pesa intent, queries Safaricom server-to-server and settles the payment (SUCCEEDED, creating exactly one PAYMENT) or releases the reservation (FAILED). Safe to repeat. Useful when the callback cannot reach the server (for example on localhost).
+      x-roles:
+      - CUSTOMER
+      - RECEPTIONIST
+      - ADMIN
+      responses:
+        '200':
+          description: Successful response.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentIntent'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      parameters:
+      - name: paymentIntentId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+  /invoices/{invoiceId}/pdf:
+    get:
+      tags:
+      - Reports
+      operationId: getInvoicePdf
+      summary: Download an invoice document
+      description: Printable invoice with company logo and details, customer, vehicle, immutable lines, payments and balance. Same ownership rules as getInvoice.
+      x-roles:
+      - CUSTOMER
+      - RECEPTIONIST
+      - ADMIN
+      responses:
+        '200':
+          description: Invoice document.
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportJson'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      parameters:
+      - name: invoiceId
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int32
+          minimum: 1
+      - &id002
+        name: format
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - pdf
+          - json
+          default: pdf
+        description: pdf returns a printable document with logo, company name, filters, date and page numbers; json returns the same rows.
+  /reports/revenue:
+    get:
+      tags:
+      - Reports
+      operationId: getRevenueReport
+      summary: Revenue report
+      description: Payments received in a period (default last 30 days, at most 366), with totals per method. Filter by method; sort by paid_at, amount, method or customer.
+      x-roles:
+      - ADMIN
+      responses:
+        '200':
+          description: Report.
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportJson'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      parameters:
+      - name: from
+        in: query
+        required: false
+        schema:
+          type: string
+          format: date-time
+          description: RFC 3339 timestamp with an explicit UTC offset.
+      - name: to
+        in: query
+        required: false
+        schema:
+          type: string
+          format: date-time
+          description: RFC 3339 timestamp with an explicit UTC offset.
+      - name: method
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - CASH
+          - CARD
+          - MOBILE_MONEY
+          - BANK_TRANSFER
+      - name: sort
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - paid_at
+          - amount
+          - method
+          - customer
+          default: paid_at
+      - &id003
+        name: order
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - asc
+          - desc
+          default: asc
+      - *id002
+  /reports/bookings:
+    get:
+      tags:
+      - Reports
+      operationId: getBookingReport
+      summary: Bookings report
+      description: Appointments starting in a period (default last 30 days) with bay, vehicle, customer and status counts.
+      x-roles:
+      - RECEPTIONIST
+      - ADMIN
+      responses:
+        '200':
+          description: Report.
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportJson'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      parameters:
+      - name: from
+        in: query
+        required: false
+        schema:
+          type: string
+          format: date-time
+          description: RFC 3339 timestamp with an explicit UTC offset.
+      - name: to
+        in: query
+        required: false
+        schema:
+          type: string
+          format: date-time
+          description: RFC 3339 timestamp with an explicit UTC offset.
+      - name: status
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - PENDING
+          - CONFIRMED
+          - CHECKED_IN
+          - COMPLETED
+          - CANCELLED
+          - NO_SHOW
+      - name: sort
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - scheduled_at
+          - status
+          - customer
+          - bay
+          default: scheduled_at
+      - *id003
+      - *id002
+  /reports/job-cards:
+    get:
+      tags:
+      - Reports
+      operationId: getJobReport
+      summary: Job cards report
+      description: Job cards opened in a period with mechanic, labour hours and parts value. Mechanics only see their own jobs.
+      x-roles:
+      - RECEPTIONIST
+      - MECHANIC
+      - ADMIN
+      responses:
+        '200':
+          description: Report.
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportJson'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      parameters:
+      - name: from
+        in: query
+        required: false
+        schema:
+          type: string
+          format: date-time
+          description: RFC 3339 timestamp with an explicit UTC offset.
+      - name: to
+        in: query
+        required: false
+        schema:
+          type: string
+          format: date-time
+          description: RFC 3339 timestamp with an explicit UTC offset.
+      - name: status
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - OPEN
+          - IN_PROGRESS
+          - AWAITING_PARTS
+          - COMPLETED
+          - CLOSED
+          - CANCELLED
+      - name: mechanic_id
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          minimum: 1
+      - name: sort
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - opened_at
+          - status
+          - mechanic
+          - customer
+          default: opened_at
+      - *id003
+      - *id002
+  /reports/outstanding-invoices:
+    get:
+      tags:
+      - Reports
+      operationId: getOutstandingInvoicesReport
+      summary: Outstanding invoices report
+      description: Unpaid and part-paid invoices as at now (optionally only those issued in a period) with balances.
+      x-roles:
+      - RECEPTIONIST
+      - ADMIN
+      responses:
+        '200':
+          description: Report.
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportJson'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      parameters:
+      - name: from
+        in: query
+        required: false
+        schema:
+          type: string
+          format: date-time
+          description: RFC 3339 timestamp with an explicit UTC offset.
+      - name: to
+        in: query
+        required: false
+        schema:
+          type: string
+          format: date-time
+          description: RFC 3339 timestamp with an explicit UTC offset.
+      - name: sort
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - issued_at
+          - balance
+          - customer
+          default: issued_at
+      - *id003
+      - *id002
+  /reports/audit:
+    get:
+      tags:
+      - Reports
+      operationId: getAuditReport
+      summary: Audit trail report
+      description: Who did what and when (default last 7 days). Filter by actor and outcome.
+      x-roles:
+      - ADMIN
+      responses:
+        '200':
+          description: Report.
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportJson'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+      parameters:
+      - name: from
+        in: query
+        required: false
+        schema:
+          type: string
+          format: date-time
+          description: RFC 3339 timestamp with an explicit UTC offset.
+      - name: to
+        in: query
+        required: false
+        schema:
+          type: string
+          format: date-time
+          description: RFC 3339 timestamp with an explicit UTC offset.
+      - name: actor_user_id
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          minimum: 1
+      - name: outcome
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - SUCCESS
+          - DENIED
+          - FAILURE
+      - name: sort
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - occurred_at
+          - actor
+          - action
+          default: occurred_at
+      - *id003
+      - *id002
 components:
   securitySchemes:
     bearerAuth:
@@ -4032,6 +4827,10 @@ components:
           minLength: 1
           format: "password"
           writeOnly: true
+        otp:
+          type: "string"
+          pattern: "^[0-9]{6}$"
+          description: "Required only when the account has two-factor authentication enabled. Without it login returns 401 MFA_REQUIRED."
       required:
         - "email"
         - "password"
@@ -4637,6 +5436,11 @@ components:
             - "CARD"
             - "MOBILE_MONEY"
             - "BANK_TRANSFER"
+          description: "Online checkout currently supports MOBILE_MONEY (M-Pesa STK push); other methods return 422."
+        phone:
+          type: "string"
+          maxLength: 30
+          description: "Safaricom number to prompt (07XXXXXXXX, 01XXXXXXXX or +2547XXXXXXXX). Defaults to the customer's profile phone."
       required:
         - "amount"
         - "method"
@@ -4996,6 +5800,122 @@ components:
       required:
         - "items"
         - "pagination"
+    Message:
+      type: object
+      additionalProperties: false
+      properties:
+        message:
+          type: string
+      required:
+      - message
+    PasswordResetRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        email:
+          type: string
+          maxLength: 160
+          format: email
+      required:
+      - email
+    PasswordReset:
+      type: object
+      additionalProperties: false
+      properties:
+        token:
+          type: string
+          minLength: 20
+          maxLength: 200
+        password: &id001
+          type: string
+          maxLength: 128
+          minLength: 12
+          writeOnly: true
+          format: password
+      required:
+      - token
+      - password
+    PasswordChange:
+      type: object
+      additionalProperties: false
+      properties:
+        current_password:
+          type: string
+          minLength: 1
+          maxLength: 128
+          writeOnly: true
+          format: password
+        new_password: *id001
+      required:
+      - current_password
+      - new_password
+    MfaStatus:
+      type: object
+      additionalProperties: false
+      properties:
+        enabled:
+          type: boolean
+      required:
+      - enabled
+    MfaSetup:
+      type: object
+      additionalProperties: false
+      properties:
+        secret:
+          type: string
+          description: Base32 secret; shown once.
+        otpauth_uri:
+          type: string
+          description: Encode as a QR code for authenticator apps.
+      required:
+      - secret
+      - otpauth_uri
+    MfaCode:
+      type: object
+      additionalProperties: false
+      properties:
+        code: &id002
+          type: string
+          pattern: ^[0-9]{6}$
+          description: Current 6-digit code from the authenticator app.
+      required:
+      - code
+    MfaDisable:
+      type: object
+      additionalProperties: false
+      properties:
+        password:
+          type: string
+          minLength: 1
+          maxLength: 128
+          writeOnly: true
+          format: password
+        code: *id002
+      required:
+      - password
+      - code
+    ReportJson:
+      type: object
+      properties:
+        title:
+          type: string
+        company:
+          type: string
+        generated_at:
+          type: string
+          format: date-time
+        filters:
+          type: array
+          items:
+            type: string
+        items:
+          type: array
+          items:
+            type: object
+        totals:
+          type: object
+          additionalProperties:
+            type: string
 x-database-schema:
   source: backend/database/schema.sql
   engine: MySQL 8.0.16+ / InnoDB
@@ -5003,4 +5923,5 @@ x-database-schema:
   timestamps: DATETIME(0); sessions use UTC and booking writes require whole seconds.
   idempotency: idempotency_key uses http_method, request_fingerprint, response_status and response_body. response_body stores the API body and replay headers in an internal envelope.
   sessions: No auth_session table. The server stores expiring login grants in idempotency_key under http_method=SESSION and path=/api/v1/auth/sessions. Logout deletes the grant; account changes revoke all matching grants.
-  payments: payment_intent status reads are supported. New online checkout requires a configured provider; pending intents reserve invoice balance until reconciled.
+  security_tables: user_mfa holds AES-256-GCM encrypted TOTP secrets; password_reset holds SHA-256 hashes of single-use reset tokens.
+  payments: payment_intent status reads are supported. M-Pesa STK push checkout is available when configured; pending intents reserve invoice balance until reconciled.

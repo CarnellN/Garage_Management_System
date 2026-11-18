@@ -5,7 +5,7 @@ import { schema, logicalSql } from './schema.js';
 export function fakeDatabase(driver = 'mysql') {
   let tables = {};
   const queries = [];
-  const ids = { CUSTOMER: 'customer_id', USER: 'user_id', VEHICLE: 'vehicle_id', BOOKING: 'booking_id', JOB_CARD: 'job_card_id', TASK: 'task_id', PART: 'part_id', SERVICE_TASK: 'service_task_id', INVOICE: 'invoice_id', INVOICE_LINE: 'invoice_line_id', PAYMENT: 'payment_id', AUDIT_EVENT: 'audit_id', IDEMPOTENCY_KEY: 'idempotency_key_id' };
+  const ids = { CUSTOMER: 'customer_id', USER: 'user_id', VEHICLE: 'vehicle_id', BOOKING: 'booking_id', JOB_CARD: 'job_card_id', TASK: 'task_id', PART: 'part_id', SERVICE_TASK: 'service_task_id', INVOICE: 'invoice_id', INVOICE_LINE: 'invoice_line_id', PAYMENT: 'payment_id', AUDIT_EVENT: 'audit_id', IDEMPOTENCY_KEY: 'idempotency_key_id', PASSWORD_RESET: 'password_reset_id' };
   const data = (table) => {
     if (!schema.has(table.toLowerCase())) throw new Error(`Unknown official table: ${table}`);
     return tables[table] ??= [];
@@ -27,7 +27,7 @@ export function fakeDatabase(driver = 'mysql') {
         const columns = plain.match(/\(([^)]+)\) VALUES/)[1].split(',').map((c) => c.trim());
         for (const column of columns) if (!schema.get(table.toLowerCase()).has(column)) throw new Error(`Unknown ${table} column: ${column}`);
         const row = Object.fromEntries(columns.map((column, index) => [column, values[index]]));
-        const unique = { USER: ['email'], VEHICLE: ['registration_no'], INVOICE: ['job_card_id'], PAYMENT: ['transaction_reference'] }[table];
+        const unique = { USER: ['email'], VEHICLE: ['registration_no'], INVOICE: ['job_card_id'], PAYMENT: ['transaction_reference'], USER_MFA: ['user_id'], PASSWORD_RESET: ['token_hash'] }[table];
         if (unique && unique.some((key) => row[key] != null && data(table).some((entry) => entry[key] === row[key]))) {
           throw Object.assign(new Error('secret database constraint details'), { code: driver === 'postgres' ? '23505' : 'ER_DUP_ENTRY' });
         }

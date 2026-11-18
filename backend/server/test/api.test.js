@@ -58,13 +58,13 @@ function assertSchema(name, value) {
   assert.equal(validate(value), true, JSON.stringify(validate.errors));
 }
 
-test('discovery identifies 54 implemented operations and provider-dependent checkout creation', async (t) => {
+test('discovery identifies 68 implemented operations and provider-dependent checkout operations', async (t) => {
   const { request } = await setup(t);
   const result = await request('/');
   assert.equal(result.status, 200);
-  assert.equal(result.body.operations.length, 55);
-  assert.equal(result.body.operations.filter((operation) => operation.implemented).length, 54);
-  assert.equal(result.body.operations.filter((operation) => operation.requiresPaymentProvider).length, 1);
+  assert.equal(result.body.operations.length, 70);
+  assert.equal(result.body.operations.filter((operation) => operation.implemented).length, 68);
+  assert.equal(result.body.operations.filter((operation) => operation.requiresPaymentProvider).length, 2);
   assert.equal((await request('/api/openapi.json')).body.openapi, '3.0.3');
 });
 

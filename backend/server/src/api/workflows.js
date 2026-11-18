@@ -4,11 +4,11 @@ import { reply, missing, conflict, invalid, ownedCustomer, vehicleFor, jobFor, a
 
 const ACTIVE = ['PENDING', 'CONFIRMED', 'CHECKED_IN'];
 const date = (value) => value instanceof Date ? value : new Date(/[zZ]|[+-]\d\d:\d\d$/.test(value) ? value : `${value.replace(' ', 'T')}Z`);
-const cents = (value) => {
+export const cents = (value) => {
   if (typeof value !== 'string' || !/^\d+\.\d{2}$/.test(value)) invalid('Expected an exact decimal string with two fractional digits.');
   return BigInt(value.replace('.', ''));
 };
-const decimal = (value) => `${value / 100n}.${String(value % 100n).padStart(2, '0')}`;
+export const decimal = (value) => `${value / 100n}.${String(value % 100n).padStart(2, '0')}`;
 function totalDecimal(value) {
   if (value < 0n || value > 999999999999n) invalid('Amount exceeds the supported invoice total.');
   return decimal(value);
@@ -83,13 +83,13 @@ async function scopedList(req, store, table, id, schema, filters = {}) {
   return { items: result.rows, pagination: { page, page_size, total: Number(count.rows[0].total) } };
 }
 
-async function invoiceFor(store, req, id, lock = false) {
+export async function invoiceFor(store, req, id, lock = false) {
   const invoice = await store.find('INVOICE', { invoice_id: id }, { lock });
   if (!invoice) missing();
   await jobFor(store, req, invoice.job_card_id);
   return invoice;
 }
-async function invoiceView(store, invoice, lockPayments = false) {
+export async function invoiceView(store, invoice, lockPayments = false) {
   const i = store.ident, marker = store.db.driver === 'postgres' ? '$1' : '?';
   const payments = await store.db.query(`SELECT ${i('amount')} FROM ${i('PAYMENT')} WHERE ${i('invoice_id')} = ${marker}${lockPayments ? ' FOR UPDATE' : ''}`, [invoice.invoice_id]);
   const lines = await store.db.query(`SELECT ${i('kind')}, ${i('description')}, ${i('quantity')}, ${i('unit_price')}, ${i('line_total')} FROM ${i('INVOICE_LINE')} WHERE ${i('invoice_id')} = ${marker} ORDER BY ${i('invoice_line_id')}`, [invoice.invoice_id]);
@@ -302,8 +302,7 @@ export function workflowHandlers({ schedule, laborRate } = {}) {
     const id = await s.insert('PAYMENT', { invoice_id: invoice.invoice_id, amount: req.body.amount, method: req.body.method, transaction_reference: reference, paid_at: new Date() }, 'payment_id');
     return reply(project('Payment', await s.find('PAYMENT', { payment_id: id })), 201, { Location: `/api/v1/payments/${id}` });
   };
-  // Online checkout needs a real, authenticated provider integration; never treat a client assertion as settled money.
-  h.createPaymentIntent = async (req, s) => { await invoiceFor(s, req, req.input.params.invoiceId); throw new HttpError(503, 'PAYMENT_PROVIDER_NOT_CONFIGURED', 'Online checkout is not configured. Contact the garage to arrange payment.'); };
+  // Online checkout (createPaymentIntent/refreshPaymentIntent) lives in payments.js with the M-Pesa adapter.
   h.getPaymentIntent = async (req, s) => {
     const intent = await s.find('PAYMENT_INTENT', { payment_intent_id: req.input.params.paymentIntentId }) ?? missing();
     await invoiceFor(s, req, intent.invoice_id);

@@ -312,5 +312,80 @@
     "method": "GET",
     "path": "/audit-events",
     "headers": []
+  },
+  "requestPasswordReset": {
+    "method": "POST",
+    "path": "/auth/password/forgot",
+    "headers": []
+  },
+  "resetPassword": {
+    "method": "POST",
+    "path": "/auth/password/reset",
+    "headers": []
+  },
+  "changePassword": {
+    "method": "POST",
+    "path": "/auth/password/change",
+    "headers": []
+  },
+  "getMfaStatus": {
+    "method": "GET",
+    "path": "/auth/mfa",
+    "headers": []
+  },
+  "setupMfa": {
+    "method": "POST",
+    "path": "/auth/mfa/setup",
+    "headers": []
+  },
+  "enableMfa": {
+    "method": "POST",
+    "path": "/auth/mfa/enable",
+    "headers": []
+  },
+  "disableMfa": {
+    "method": "POST",
+    "path": "/auth/mfa/disable",
+    "headers": []
+  },
+  "resetUserMfa": {
+    "method": "POST",
+    "path": "/users/{userId}/mfa/reset",
+    "headers": []
+  },
+  "refreshPaymentIntent": {
+    "method": "POST",
+    "path": "/payment-intents/{paymentIntentId}/refresh",
+    "headers": []
+  },
+  "getInvoicePdf": {
+    "method": "GET",
+    "path": "/invoices/{invoiceId}/pdf",
+    "headers": []
+  },
+  "getRevenueReport": {
+    "method": "GET",
+    "path": "/reports/revenue",
+    "headers": []
+  },
+  "getBookingReport": {
+    "method": "GET",
+    "path": "/reports/bookings",
+    "headers": []
+  },
+  "getJobReport": {
+    "method": "GET",
+    "path": "/reports/job-cards",
+    "headers": []
+  },
+  "getOutstandingInvoicesReport": {
+    "method": "GET",
+    "path": "/reports/outstanding-invoices",
+    "headers": []
+  },
+  "getAuditReport": {
+    "method": "GET",
+    "path": "/reports/audit",
+    "headers": []
   }
 }

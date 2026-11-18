@@ -11,6 +11,7 @@ import { createDatabase } from '../src/database.js';
 import { createStore } from '../src/api/sql.js';
 import { hashPassword } from '../src/api/security.js';
 import { operations } from '../src/api/contract.js';
+import { currentStep, totpAt } from '../src/api/mfa.js';
 
 const exec = promisify(execFile);
 const docker = async (...args) => (await exec('docker', args, { timeout: 600000, maxBuffer: 8 * 1024 * 1024 })).stdout.trim();
@@ -68,7 +69,7 @@ test('official schema and API against isolated MySQL 8.0', { timeout: 600000 }, 
   const store = createStore(database);
   await t.test('official DDL installs unchanged; Linux table names and UTC connections are enforced', async () => {
     const rows = (await database.query('SHOW TABLES')).rows;
-    assert.equal(rows.length, 16);
+    assert.equal(rows.length, 18);
     const config = (await database.query('SELECT @@lower_case_table_names AS table_case, @@session.time_zone AS zone')).rows[0];
     assert.equal(Number(config.table_case), 0);
     assert.equal(config.zone, '+00:00');
@@ -82,7 +83,17 @@ test('official schema and API against isolated MySQL 8.0', { timeout: 600000 }, 
   await store.insert('USER', { name: 'Bootstrap Admin', email: 'admin@example.com', password_hash: await hashPassword(loginPassword), role: 'ADMIN', active: true, customer_id: null }, 'user_id');
   await store.insert('BAY', { name: 'Bay One', enabled: true }, 'bay_id');
   const auth = { secret: randomUUID() + randomUUID() };
-  const app = createApp({ database, auth, logger, workflows: { schedule: { open: 480, close: 1020, days: [0,1,2,3,4,5,6] }, laborRate: '1000.00' } });
+  const outbox = [];
+  const mailer = { configured: true, async send(message) { outbox.push(message); } };
+  const callbackToken = 'integration-callback-token-0123456789abcdef';
+  let providerAnswer = { state: 'SUCCEEDED', resultCode: '0' }, checkoutCount = 0;
+  // Stand-in for Safaricom Daraja; the settlement SQL and locking run against real MySQL.
+  const mpesa = {
+    configured: true, callbackToken,
+    async stkPush() { checkoutCount += 1; return { checkoutRequestId: `ws_CO_INTEGRATION_${checkoutCount}` }; },
+    async query() { return providerAnswer; },
+  };
+  const app = createApp({ database, auth, logger, mailer, mpesa, company: { name: 'Integration Garage Ltd', phone: '+254700000000' }, workflows: { schedule: { open: 480, close: 1020, days: [0,1,2,3,4,5,6] }, laborRate: '1000.00' } });
   server = app.listen(0, '127.0.0.1');
   await once(server, 'listening');
   const base = `http://127.0.0.1:${server.address().port}/api/v1`;
@@ -241,9 +252,88 @@ test('official schema and API against isolated MySQL 8.0', { timeout: 600000 }, 
     await call('GET', `/payment-intents/${intentId}`, { token: customers[0].access_token, expected: 404 });
     await call('POST', `/invoices/${id}/payments`, { body: { amount: '10.01', method: 'CASH' }, expected: 409 });
     await call('POST', `/invoices/${id}/payments`, { body: { amount: '10.00', method: 'CASH' }, expected: 201 });
-    await call('POST', `/invoices/${id}/payment-intents`, { token: customers[1].access_token, body: { amount: '1.00', method: 'CARD' }, expected: 503 });
+    await call('POST', `/invoices/${id}/payment-intents`, { token: customers[1].access_token, body: { amount: '1.00', method: 'CARD' }, expected: 422 });
     await store.update('PAYMENT_INTENT', { payment_intent_id: intentId }, { status: 'FAILED' });
     await call('POST', `/invoices/${id}/payments`, { body: { amount: '90.00', method: 'CARD', transaction_reference: 'verified-provider-transaction' }, expected: 201 });
+  });
+
+  await t.test('two-factor login, password recovery, M-Pesa settlement and PDF reports use real tables', async () => {
+    // Two-factor authentication for the admin.
+    assert.equal((await call('GET', '/auth/mfa')).data.enabled, false);
+    const enrol = await call('POST', '/auth/mfa/setup', { expected: 201 });
+    const stored = (await database.query('SELECT secret_encrypted FROM user_mfa WHERE user_id = ?', [admin.user.user_id])).rows[0];
+    assert.ok(!stored.secret_encrypted.includes(enrol.data.secret));
+    await call('POST', '/auth/mfa/enable', { body: { code: totpAt(enrol.data.secret, currentStep()) } });
+    const challenge = await call('POST', '/auth/login', { token: null, body: { email: 'admin@example.com', password: loginPassword }, expected: 401 });
+    assert.equal(challenge.data.code, 'MFA_REQUIRED');
+    await database.query('UPDATE user_mfa SET last_used_step = ? WHERE user_id = ?', [currentStep() - 2, admin.user.user_id]);
+    const secondFactor = await call('POST', '/auth/login', { token: null, body: { email: 'admin@example.com', password: loginPassword, otp: totpAt(enrol.data.secret, currentStep()) } });
+    assert.equal(secondFactor.data.user.role, 'ADMIN');
+    await database.query('UPDATE user_mfa SET last_used_step = ? WHERE user_id = ?', [currentStep() - 2, admin.user.user_id]);
+    await call('POST', '/auth/mfa/disable', { body: { password: loginPassword, code: totpAt(enrol.data.secret, currentStep()) } });
+    await call('POST', '/auth/mfa/setup', { token: staff[3].access_token, expected: 201 });
+    await call('POST', `/users/${staff[3].user.user_id}/mfa/reset`);
+    await call('GET', '/auth/me', { token: staff[3].access_token, expected: 401 });
+
+    // Password recovery and change.
+    await call('POST', '/auth/password/forgot', { token: null, body: { email: 'customer1@example.com' }, expected: 202 });
+    const resetToken = outbox.at(-1).text.match(/token=([A-Za-z0-9_-]+)/)[1];
+    const newPassword = 'A different integration password 456';
+    await call('POST', '/auth/password/reset', { token: null, body: { token: resetToken, password: newPassword }, expected: 204 });
+    await call('POST', '/auth/password/reset', { token: null, body: { token: resetToken, password: newPassword }, expected: 400 });
+    await call('GET', '/auth/me', { token: customers[1].access_token, expected: 401 });
+    customers[1] = { ...customers[1], ...(await call('POST', '/auth/login', { token: null, body: { email: 'customer1@example.com', password: newPassword } })).data };
+    await call('POST', '/auth/password/change', { token: customers[1].access_token, body: { current_password: newPassword, new_password: loginPassword }, expected: 204 });
+    customers[1] = { ...customers[1], ...(await call('POST', '/auth/login', { token: null, body: { email: 'customer1@example.com', password: loginPassword } })).data };
+
+    // M-Pesa: reserve, prompt, verified callback settles exactly one payment; refresh releases a failure.
+    const jobId = await store.insert('JOB_CARD', { vehicle_id: customers[1].vehicle.vehicle_id, booking_id: null, mechanic_id: staff[2].user.user_id, opened_at: new Date(), status: 'COMPLETED', version: 1 }, 'job_card_id');
+    const invoiceId = await store.insert('INVOICE', { job_card_id: jobId, total_amount: '500.00', currency: 'KES', issued_at: new Date() }, 'invoice_id');
+    await store.insert('INVOICE_LINE', { invoice_id: invoiceId, kind: 'LABOR', description: 'Integration work', quantity: '1.00', unit_price: '500.00', line_total: '500.00' });
+    const intent = await call('POST', `/invoices/${invoiceId}/payment-intents`, { token: customers[1].access_token, body: { amount: '200.00', method: 'MOBILE_MONEY', phone: '0712345678' }, expected: 201 });
+    await call('POST', `/invoices/${invoiceId}/payment-intents`, { token: customers[1].access_token, body: { amount: '301.00', method: 'MOBILE_MONEY', phone: '0712345678' }, expected: 409 });
+    const callbackBody = { Body: { stkCallback: { CheckoutRequestID: 'ws_CO_INTEGRATION_1', ResultCode: 0, CallbackMetadata: { Item: [{ Name: 'Amount', Value: 200 }, { Name: 'MpesaReceiptNumber', Value: 'TKINTEG001' }] } } } };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const ack = await fetch(`${base}/payments/mpesa/callback/${callbackToken}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(callbackBody) });
+      assert.equal(ack.status, 200);
+    }
+    const settled = await call('GET', `/payment-intents/${intent.data.payment_intent_id}`, { token: customers[1].access_token });
+    assert.equal(settled.data.status, 'SUCCEEDED');
+    const receipts = (await database.query('SELECT * FROM payment WHERE invoice_id = ?', [invoiceId])).rows;
+    assert.deepEqual(receipts.map((row) => [row.amount, row.transaction_reference]), [['200.00', 'TKINTEG001']]);
+    const second = await call('POST', `/invoices/${invoiceId}/payment-intents`, { token: customers[1].access_token, body: { amount: '300.00', method: 'MOBILE_MONEY', phone: '0712345678' }, expected: 201 });
+    providerAnswer = { state: 'FAILED', resultCode: '1032' };
+    const released = await call('POST', `/payment-intents/${second.data.payment_intent_id}/refresh`, { token: customers[1].access_token });
+    assert.equal(released.data.status, 'FAILED');
+    await call('POST', `/invoices/${invoiceId}/payments`, { body: { amount: '300.00', method: 'CASH' }, expected: 201 });
+
+    // Reports: every report runs its real SQL, as JSON and as a branded PDF.
+    const pdf = async (path, token = admin.access_token) => {
+      const operation = operations.find((op) => op.method === 'get' && new RegExp(`^${op.path.replace(/\{\w+\}/g, '[^/]+')}$`).test(path.split('?')[0]));
+      exercised.add(operation.operationId);
+      const response = await fetch(`${base}${path}`, { headers: { Authorization: `Bearer ${token}` } });
+      assert.equal(response.status, 200, path);
+      assert.equal(response.headers.get('content-type'), 'application/pdf');
+      const bytes = Buffer.from(await response.arrayBuffer());
+      assert.equal(bytes.subarray(0, 5).toString(), '%PDF-');
+      return bytes;
+    };
+    const range = `from=${encodeURIComponent(new Date(Date.now() - 86400000).toISOString())}&to=${encodeURIComponent(new Date(Date.now() + 86400000 * 40).toISOString())}`;
+    const revenue = await call('GET', `/reports/revenue?${range}&format=json&sort=amount&order=desc`);
+    assert.equal(revenue.data.totals['Total revenue'], 'KES 2,130.03');
+    assert.equal(revenue.data.items[0].amount, '1530.03');
+    const bookingsJson = await call('GET', `/reports/bookings?${range}&format=json&status=COMPLETED`);
+    assert.ok(bookingsJson.data.items.every((row) => row.status === 'COMPLETED'));
+    const jobs = await call('GET', `/reports/job-cards?${range}&format=json`, { token: staff[2].access_token });
+    assert.ok(jobs.data.items.length >= 1 && jobs.data.items.every((row) => row.mechanic_name === 'Staff 2'), 'mechanics only see their own jobs');
+    await call('GET', `/reports/job-cards?mechanic_id=${staff[3].user.user_id}`, { token: staff[2].access_token, expected: 404 });
+    const outstanding = await call('GET', '/reports/outstanding-invoices?format=json&sort=balance&order=desc');
+    assert.ok(outstanding.data.items.every((row) => row.balance_due !== '0.00'));
+    const audit = await call('GET', `/reports/audit?${range}&format=json&outcome=FAILURE`);
+    assert.ok(audit.data.items.length > 0 && audit.data.items.every((row) => row.outcome === 'FAILURE'));
+    for (const path of [`/reports/revenue?${range}`, `/reports/bookings?${range}`, `/reports/job-cards?${range}`, '/reports/outstanding-invoices', `/reports/audit?${range}`]) await pdf(path);
+    await pdf(`/invoices/${invoiceId}/pdf`, customers[1].access_token);
+    await call('GET', `/invoices/${invoiceId}/pdf?format=json`, { token: customers[0].access_token, expected: 404 });
   });
 
   await t.test('sessions revoke durably; database constraints and audit filters are real', async () => {

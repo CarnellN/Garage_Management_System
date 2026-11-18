@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 import { schema, validateIdentifiers } from './support/schema.js';
 import { createStore } from '../src/api/sql.js';
 
-test('official reference has the sixteen supplied tables and current column names', () => {
-  assert.equal(schema.size, 16);
+test('official reference has the eighteen tables and current column names', () => {
+  assert.equal(schema.size, 18);
+  assert.ok(schema.get('user_mfa').has('secret_encrypted'));
+  assert.ok(schema.get('password_reset').has('token_hash'));
   assert.ok(schema.has('job_part'));
   assert.ok(!schema.has('job_parts'));
   assert.ok(!schema.has('auth_session'));

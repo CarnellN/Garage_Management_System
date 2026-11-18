@@ -6,8 +6,9 @@ import { HttpError, errorHandler } from './errors.js';
 import swaggerUi from 'swagger-ui-express';
 import { contract } from './api/contract.js';
 import { createApiRouter } from './api/router.js';
+import { mpesaCallback } from './api/payments.js';
 
-export function createApp({ database, corsOrigins = [], auth, workflows, logger = console, extraHandlers }) {
+export function createApp({ database, corsOrigins = [], auth, workflows, logger = console, extraHandlers, mpesa, mailer, company, appBaseUrl, dataEncryptionKey }) {
   const app = express();
   app.disable('x-powered-by');
   // Leave proxy trust disabled until the deployment's exact proxy topology is known.
@@ -51,7 +52,11 @@ export function createApp({ database, corsOrigins = [], auth, workflows, logger 
 
   app.get('/api/openapi.json', (req, res) => res.json(contract));
   app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(contract, { swaggerOptions: { persistAuthorization: false } }));
-  app.use('/api/v1', createApiRouter({ database, auth, workflows, logger, extraHandlers }));
+  // Safaricom posts STK results here. The secret path token and a server-side status query protect settlement.
+  if (mpesa?.configured && mpesa.callbackToken) {
+    app.post('/api/v1/payments/mpesa/callback/:token', mpesaCallback({ database, mpesa, callbackToken: mpesa.callbackToken, logger }));
+  }
+  app.use('/api/v1', createApiRouter({ database, auth, workflows, logger, extraHandlers, mpesa, mailer, company, appBaseUrl, dataEncryptionKey }));
   app.use((req, res, next) => next(new HttpError(404, 'NOT_FOUND', 'The requested endpoint does not exist.')));
   app.use(errorHandler(logger));
   return app;

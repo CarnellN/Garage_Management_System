@@ -9,7 +9,7 @@ While the server is running:
 - `/api/openapi.json` returns the same contract as [openapi.yaml](openapi.yaml).
 - `/health` checks liveness; `/health/ready` checks database connectivity, not schema readiness.
 
-54 operations have server handlers for authentication, staff, customers, vehicles, scheduling, job work, catalogs, invoices, settled payments and audit reads. Online payment-intent creation returns `503 PAYMENT_PROVIDER_NOT_CONFIGURED` until a provider adapter is implemented. Reading an existing payment intent is supported, with invoice ownership checks. Staff can record completed cash or manually verified non-cash payments. A browser cannot declare a payment settled.
+All 70 operations have server handlers: authentication (including password reset/change and TOTP two-factor), staff, customers, vehicles, scheduling, job work, catalogs, invoices, payments, M-Pesa checkout, PDF/JSON reports and audit reads. M-Pesa checkout (`createPaymentIntent`, `refreshPaymentIntent`) returns `503 PAYMENT_PROVIDER_NOT_CONFIGURED` until the server's `MPESA_*` settings are filled in. Reading an existing payment intent is supported, with invoice ownership checks. Staff can record completed cash or manually verified non-cash payments. A browser cannot declare a payment settled.
 
 The database developer provisions the [official schema](../backend/database/schema.sql); [integration notes](../backend/database/README.md) explain the exact mapping and the session-grant convention in idempotency_key. No additional session table is required. Missing tables/columns return `503 SCHEMA_NOT_READY`. Missing JWT secret, opening-hours configuration or labor rate return a specific configuration error. No migrations run on startup. `npm test` uses database doubles; `npm run test:mysql` exercises real SQL and competing booking/invoice/payment requests in a disposable Docker database. Your actual deployment still needs connection/configuration checks and frontend integration.
 
@@ -73,6 +73,14 @@ await api.updateBookingStatus({
 Availability is advisory; creation may return `409 BOOKING_CONFLICT`. Booking and job mutations require the strong `ETag` from the latest GET, supplied verbatim as `If-Match`. Task/part mutations use the parent job card's ETag and return its new ETag. On `412`, refetch and let the user reconcile; on `428`, supply the missing ETag. Opening hours and future appointment checks run on the server. Date-time requests require an explicit UTC offset; booking write timestamps must have zero fractional seconds to match DATETIME(0). Responses use UTC `Z`.
 
 For operations requiring `Idempotency-Key`, generate a key per logical creation/payment, retain it until the outcome is known, and reuse it with the identical body when recovering from a network failure. The server retains successful responses for at least 24 hours. Do not generate a fresh key when retrying an uncertain payment. Changing the body under the same key returns 409. There are no automatic online payment retries or unverified settlement paths.
+
+## Account security, M-Pesa and reports
+
+- **Login with two-factor:** send `{ email, password }`. A `401` with code `MFA_REQUIRED` means show a 6-digit code field and resend with `otp`. `INVALID_OTP` means the code was wrong or already used.
+- **Two-factor setup:** `setupMfa` returns `secret` and `otpauth_uri` once; render the URI as a QR code, then call `enableMfa({ body: { code } })`. `getMfaStatus` returns `{ enabled }`.
+- **Forgot password:** `requestPasswordReset` always returns 202 with the same message. The email links to `${APP_BASE_URL}/reset-password?token=...`; that page calls `resetPassword({ body: { token, password } })` and then sends the user to login. `changePassword` (signed in) ends every session, so redirect to login after 204.
+- **M-Pesa:** `createPaymentIntent({ path: { invoiceId }, body: { amount: '2500.00', method: 'MOBILE_MONEY', phone }, idempotencyKey })` returns a PENDING intent while the customer's phone shows the PIN prompt. Poll `getPaymentIntent` every few seconds (or call `refreshPaymentIntent`) until `SUCCEEDED` or `FAILED`, then reload the invoice. Amounts must be whole shillings.
+- **Reports and invoice PDFs** return `application/pdf` by default. Fetch them with the bearer token and open the blob (`URL.createObjectURL`) rather than linking directly, since the request needs the `Authorization` header. Add `format=json` for table data. Filters: `from`, `to`, report-specific filters, `sort`, `order`.
 
 ## Data and errors
 

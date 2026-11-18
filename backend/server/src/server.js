@@ -1,6 +1,8 @@
 import { createApp } from './app.js';
 import { loadConfig } from './config.js';
 import { createDatabase } from './database.js';
+import { createMailer } from './services/mailer.js';
+import { createMpesa } from './services/mpesa.js';
 
 async function main() {
   const config = loadConfig();
@@ -8,7 +10,11 @@ async function main() {
   let server;
   try {
     await database.check();
-    const app = createApp({ database, corsOrigins: config.corsOrigins, auth: config.auth, workflows: config.workflows });
+    const mpesa = config.mpesa ? Object.assign(createMpesa(config.mpesa), { callbackToken: config.mpesa.callbackToken }) : undefined;
+    const app = createApp({
+      database, corsOrigins: config.corsOrigins, auth: config.auth, workflows: config.workflows,
+      mailer: createMailer(config.mail), mpesa, company: config.company, appBaseUrl: config.appBaseUrl, dataEncryptionKey: config.dataEncryptionKey,
+    });
     server = await new Promise((resolve, reject) => {
       const listener = app.listen(config.port, config.host);
       listener.once('error', reject);
@@ -20,7 +26,7 @@ async function main() {
   }
   server.requestTimeout = 15000;
   server.headersTimeout = 10000;
-  console.info({ event: 'server_started', host: config.host, port: config.port });
+  console.info({ event: 'server_started', host: config.host, port: config.port, mpesa: config.mpesa ? config.mpesa.environment : 'not configured', smtp: Boolean(config.mail.host) });
 
   let stopping = false;
   const shutdown = () => {

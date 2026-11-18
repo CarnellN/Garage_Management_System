@@ -15,7 +15,12 @@ mysql -u root -p garage_management_db -e "source backend/database/schema.sql"
 
 # 3. Load seed data (development only)
 mysql -u root -p garage_management_db -e "source backend/database/seed.sql"
+
+# Upgrading a database created before November 2026 (16 tables):
+mysql -u root -p garage_management_db -e "source backend/database/migrations/001_mfa_password_reset.sql"
 ```
+
+Alternatively, from `backend/server` run `npm run setup` (wizard) or `npm run db:init` (schema + migrations, add `-- --seed` for demo data).
 
 In Git Bash or cmd, `mysql -u root -p garage_management_db < backend/database/seed.sql` also works.
 
@@ -36,10 +41,11 @@ mysql -u root -p -e "DROP DATABASE garage_management_db; CREATE DATABASE garage_
 
 | File         | Purpose                                                          |
 | ------------ | ---------------------------------------------------------------- |
-| `schema.sql` | Creates all 16 tables with constraints, indexes and foreign keys |
+| `schema.sql` | Creates all 18 tables with constraints, indexes and foreign keys |
+| `migrations/` | Idempotent upgrade scripts for databases created from an earlier schema |
 | `seed.sql`   | Inserts realistic sample data for development and demos          |
 
-## Tables (16)
+## Tables (18)
 
 | #   | Table             | Description                                                   |
 | --- | ----------------- | ------------------------------------------------------------- |
@@ -59,6 +65,8 @@ mysql -u root -p -e "DROP DATABASE garage_management_db; CREATE DATABASE garage_
 | 14  | `payment_intent`  | Durable payment initiation records (M-Pesa, card, etc.)       |
 | 15  | `audit_event`     | Append-only audit trail for all critical actions              |
 | 16  | `idempotency_key` | Prevents duplicate mutation requests                          |
+| 17  | `user_mfa`        | Two-factor (TOTP) enrolment; secret encrypted with AES-256-GCM |
+| 18  | `password_reset`  | Single-use password reset tokens (SHA-256 hash only)          |
 
 ## Key relationships
 
@@ -76,6 +84,8 @@ invoice   1──M  payment
 invoice   1──M  payment_intent
 user (MECHANIC) 1──M  job_card
 user      1──M  audit_event   (as actor)
+user      1──0..1  user_mfa
+user      1──M  password_reset
 ```
 
 ## Normalisation notes (3NF)
@@ -99,7 +109,7 @@ user      1──M  audit_event   (as actor)
 
 ## Seed data credentials
 
-All seeded user accounts use the password **`Password123!`**.
+All seeded user accounts use the password **`Password123!`**. Change these passwords before any non-demo use.
 
 | Email                        | Role         | Client portal                     |
 | ---------------------------- | ------------ | --------------------------------- |
@@ -134,9 +144,9 @@ UPDATE `user` SET password_hash = '<hash from the command above>' WHERE user_id 
 Login also needs `JWT_SECRET` set in `backend/server/.env.local`; see the [server README](../server/README.md#troubleshooting).
 # Official database schema
 
-[schema.sql](schema.sql) is the database developer's supplied MySQL 8.0.16+ / InnoDB schema, preserved unchanged as the integration reference. The database developer owns provisioning, migrations and seed data. The server never executes this file or creates tables at startup.
+[schema.sql](schema.sql) is the MySQL 8.0.16+ / InnoDB schema: the database developer's original 16 tables plus `user_mfa` and `password_reset` (also shipped as [migrations/001_mfa_password_reset.sql](migrations/001_mfa_password_reset.sql) for existing databases). The API process never creates tables by itself; the schema is applied explicitly by `npm run db:init`, the `npm run setup` wizard, or the Docker image's start command. All statements are idempotent (`IF NOT EXISTS`).
 
-The server quotes the official lowercase names: `customer`, `user`, `vehicle`, `bay`, `booking`, `job_card`, `service_task`, `task`, `part`, `job_part`, `invoice`, `invoice_line`, `payment`, `payment_intent`, `audit_event`, and `idempotency_key`. In particular, part usage is singular `job_part`, and invoice lines use `invoice_line_id`.
+The server quotes the official lowercase names: `customer`, `user`, `vehicle`, `bay`, `booking`, `job_card`, `service_task`, `task`, `part`, `job_part`, `invoice`, `invoice_line`, `payment`, `payment_intent`, `audit_event`, `idempotency_key`, `user_mfa` and `password_reset`. In particular, part usage is singular `job_part`, and invoice lines use `invoice_line_id`.
 
 ## Server mapping
 
@@ -162,7 +172,12 @@ The official schema has no `auth_session` table. To preserve durable token revoc
 
 Every authenticated request checks the grant and current account. Logout deletes the grant; staff role/activation updates delete that user's SESSION records only. Password/role/link changes made out of band invalidate grants through the account fingerprint. Normal HTTP retry records are in a separate method/path namespace. Cleanup must delete only expired records; deleting unexpired SESSION records logs those users out. Share this storage convention with any process that manages the same table.
 
-The first active admin is provisioned by the database/deployment owner with a server-generated salted scrypt hash (`scrypt$32768$8$1$<32 hex salt>$<128 hex hash>`) and null customer_id. New customer registrations create their profile/account atomically. The server enforces CUSTOMER/customer_id and staff/null linkage because the official schema leaves that rule at the application layer.
+The first active admin is created with `npm run admin:create` (or the setup wizard), which stores a server-generated salted scrypt hash (`scrypt$32768$8$1$<32 hex salt>$<128 hex hash>`) and null customer_id. New customer registrations create their profile/account atomically. The server enforces CUSTOMER/customer_id and staff/null linkage because the official schema leaves that rule at the application layer.
+
+## Two-factor authentication and password reset
+
+- `user_mfa.secret_encrypted` holds the TOTP secret encrypted with AES-256-GCM (`v1.<iv>.<tag>.<ciphertext>`). The key is `DATA_ENCRYPTION_KEY`, or an HKDF derivation of `JWT_SECRET` when that is unset; losing the key means users must re-enrol. `last_used_step` blocks reuse of a code.
+- `password_reset.token_hash` is the SHA-256 of a 256-bit random token that is only ever emailed. Rows are single-use (`used_at`) and expire after 30 minutes; issuing a new token marks older unused ones as used. Expired rows can be deleted at any time.
 
 ## Scheduling, payments and time
 
@@ -170,6 +185,6 @@ The official timestamps are DATETIME with whole-second precision. Connections se
 
 MySQL transactions explicitly use SERIALIZABLE for the next transaction, then acquire the existing application locks: actor account, vehicle, enabled bays in ID order, and overlapping bookings as appropriate. The booking read is a current FOR UPDATE read. Every booking writer must use the same reservation protocol; there is no MySQL exclusion constraint. Seed at least one enabled bay. Job writes lock the parent job and enforce version ETags. Invoices require unique job_card_id; payment writes lock the invoice and read settled payments plus PENDING payment intents with FOR UPDATE before checking unreserved balance. A pending intent's timestamp expiry does not alone prove a charge failed; reconcile its status before releasing its reservation.
 
-`GET /payment-intents/{paymentIntentId}` reads existing intent status with invoice ownership checks. Checkout creation still returns PAYMENT_PROVIDER_NOT_CONFIGURED until a real provider, authenticated callbacks and reconciliation are implemented. Staff payment recording attests to a completed cash or independently verified non-cash transaction; a browser cannot settle money itself.
+`GET /payment-intents/{paymentIntentId}` reads existing intent status with invoice ownership checks. M-Pesa checkout inserts a PENDING `payment_intent` (reserving the amount) and stores Daraja's CheckoutRequestID in `provider_id`. Settlement locks the invoice then the intent, inserts one `payment` with the M-Pesa receipt as `transaction_reference`, and marks the intent SUCCEEDED (or FAILED, releasing the reservation), only after a server-side STK status query confirms the outcome. Staff payment recording attests to a completed cash or independently verified non-cash transaction; a browser cannot settle money itself.
 
-Use `backend/server/.env` and `npm run db:check` after the database developer provisions the schema. `npm test` checks identifiers and mocked workflows. For real-engine verification, run `npm run test:mysql` from `backend/server` with Docker running: it applies this schema to an isolated disposable MySQL 8.0 container and exercises all API routes plus competing booking/invoice/payment requests. It never reads your `.env` or changes the configured database. Keep database credentials and migration privileges outside the frontend. Deployment-specific integration and production-load testing remain separate.
+Use `backend/server/.env.local` and `npm run db:check` after the database developer provisions the schema. `npm test` checks identifiers and mocked workflows. For real-engine verification, run `npm run test:mysql` from `backend/server` with Docker running: it applies this schema to an isolated disposable MySQL 8.0 container and exercises all API routes plus competing booking/invoice/payment requests. It never reads your `.env` or changes the configured database. Keep database credentials and migration privileges outside the frontend. Deployment-specific integration and production-load testing remain separate.

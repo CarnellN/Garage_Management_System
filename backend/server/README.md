@@ -2,13 +2,15 @@
 
 Express 5 API for [the API contract](../../docs/openapi.yaml), using Node.js 22+ and MySQL 8.0.16+ through `mysql2`.
 
-Implemented: 54 business operations for authentication, staff accounts, customers, vehicles, bookings, job cards, tasks, part usage/catalogs, service templates, invoices, settled payments and audit reads. Includes role/ownership checks, request validation from OpenAPI, ETags, transactional audit and durable idempotency. Online checkout creation returns `503 PAYMENT_PROVIDER_NOT_CONFIGURED` until a provider is integrated; existing payment intents can be read with ownership checks. See the [frontend integration guide](../../docs/FRONTEND_API.md) and [database handoff](../database/README.md).
+Implemented: all 70 operations — authentication (registration, login/logout, forgot/reset/change password, TOTP two-factor), staff accounts, customers, vehicles, bookings, job cards, tasks, part usage/catalogs, service templates, invoices, payments, M-Pesa STK push checkout, PDF/JSON reports and audit reads. Includes role/ownership checks, request validation from OpenAPI, ETags, transactional audit (including failed changes) and durable idempotency. M-Pesa checkout returns `503 PAYMENT_PROVIDER_NOT_CONFIGURED` until the `MPESA_*` settings are provided. End-user instructions are in the [user manual](../../docs/USER_MANUAL.md). See the [frontend integration guide](../../docs/FRONTEND_API.md) and [database handoff](../database/README.md).
 
-The database developer owns provisioning and migrations. This server does not change the schema. The server now targets the official lowercase MySQL tables in `backend/database/schema.sql`. Session grants use an isolated SESSION namespace in the existing `idempotency_key` table; no additional session table is required. Missing schema returns `SCHEMA_NOT_READY`. Tests use database doubles; actual SQL/constraints and concurrency must be validated against the provisioned engines before release.
+The server targets the lowercase MySQL tables in `backend/database/schema.sql` (18 tables, including `user_mfa` and `password_reset`). The API process never changes the schema itself; `npm run db:init`, `npm run setup` or the Docker start command apply `schema.sql` and `migrations/` explicitly. Session grants use an isolated SESSION namespace in the existing `idempotency_key` table; no additional session table is required. Missing schema returns `SCHEMA_NOT_READY`. Tests use database doubles; actual SQL/constraints and concurrency must be validated against the provisioned engines before release.
 
 ## Local setup
 
-From the repository root in PowerShell:
+Quickest: `npm install` then `npm run setup` — an interactive wizard that writes `.env.local` with generated secrets, checks the database, installs tables (optionally demo data) and creates the first admin. For containers, see `docker-compose.yml` at the repository root and the [user manual](../../docs/USER_MANUAL.md#2-installing-the-system).
+
+Manual setup from the repository root in PowerShell:
 
 ```powershell
 cd backend/server
@@ -19,6 +21,8 @@ Copy-Item .env.example .env.local
 node -e "console.log(require('node:crypto').randomBytes(48).toString('base64url'))"
 # Confirm GARAGE_OPEN_TIME, GARAGE_CLOSE_TIME, GARAGE_OPEN_DAYS and LABOR_HOURLY_RATE.
 npm.cmd run db:check
+npm.cmd run db:init
+npm.cmd run admin:create
 npm.cmd run dev
 ```
 
@@ -26,11 +30,11 @@ Use `npm ci` for subsequent clean installs with the committed lockfile. On shell
 
 ## Real MySQL integration tests
 
-With Docker Desktop running, execute `npm.cmd run test:mysql` from `backend/server`. The test starts a disposable `mysql:8.0` container, applies the official schema unchanged, bootstraps only test accounts, and exercises all 55 API routes. It checks authentication/ownership, searches and joined lists, retry replay, timestamp handling, immutable invoice snapshots, pending payment reservations, and competing booking/invoice/payment requests. Checkout creation is expected to return PAYMENT_PROVIDER_NOT_CONFIGURED.
+With Docker Desktop running, execute `npm.cmd run test:mysql` from `backend/server`. The test starts a disposable `mysql:8.0` container, applies the schema, bootstraps only test accounts, and exercises all 70 API routes. It checks authentication/ownership, two-factor login, password reset/change, searches and joined lists, retry replay, timestamp handling, immutable invoice snapshots, pending payment reservations, M-Pesa settlement through the callback and refresh paths (with a stand-in for Safaricom's API), every report's SQL as JSON and PDF, and competing booking/invoice/payment requests.
 
 The harness does not load `.env` or use your configured DATABASE_URL. It uses a unique container name, a random loopback-only port, test-only credentials and a temporary in-memory database volume. It closes the HTTP server/pool and stops/removes its own labeled container on completion or test failure. The Docker image is cached locally for subsequent runs. First use may download the image; allow a few minutes and Docker access on Windows. Do not run this command as a production database smoke test.
 
-Verified on 29 October 2026 with MySQL 8.0.46: all eight integration scenarios passed, exercising all 55 operation routes. The 51 unit/API tests also passed. These targeted competing-request checks do not replace production-load/performance testing or verification of the deployment's own database configuration.
+Verified on 18 November 2026 with MySQL 8.0.46: all nine integration scenarios passed, exercising all 70 operation routes. The 59 unit/API tests also passed. These targeted competing-request checks do not replace production-load/performance testing or verification of the deployment's own database configuration.
 
 MySQL connection/transaction setup commands use the text protocol because SET TRANSACTION is unsupported by MySQL's prepared-statement protocol. Application data statements continue using prepared execution with bound values. Unit tests cover this distinction to prevent regressions.
 
@@ -94,6 +98,14 @@ Use `database.transaction(async (tx) => { ... })` for atomic work; every stateme
 Connections have a 5-second establishment timeout and queries a 6-second client timeout. MySQL fails immediately if the pool is at capacity and destroys timed-out connections; no unbounded pool wait queue is used. A client timeout does not prove a write failed: reconcile through workflow idempotency before retrying.
 
 The official schema uses lowercase names (including singular `job_part`), `invoice_line_id`, and DATETIME(0). Booking writes require whole seconds; MySQL session timestamps are UTC. MySQL transactions explicitly use SERIALIZABLE. MySQL must lock the relevant bay/vehicle rows in a consistent order and recheck overlap inside the reservation transaction. Verify those invariants under concurrency against the provisioned database before enabling workflows. The current test suite checks schema identifiers, HTTP workflows and boundary rules; it does not establish real-engine SQL or concurrent booking guarantees.
+
+## Security features, payments and reports
+
+- **Passwords:** salted scrypt hashes. Forgot-password emails a 256-bit single-use token valid for 30 minutes (only its SHA-256 is stored); reset and change revoke all sessions. Configure `SMTP_*`; without SMTP, development servers print the email to the log and production servers log `mail_not_configured`.
+- **Two-factor:** RFC 6238 TOTP (6 digits, 30 s, ±1 step) with replay protection. Secrets are encrypted with AES-256-GCM using `DATA_ENCRYPTION_KEY` (or an HKDF key derived from `JWT_SECRET`). Login returns `401 MFA_REQUIRED` until `otp` is supplied.
+- **M-Pesa:** `src/services/mpesa.js` implements Daraja OAuth, STK push and STK query. Checkout commits the PENDING reservation before calling Safaricom, so no lock is held during the network call. The callback (`POST /api/v1/payments/mpesa/callback/<MPESA_CALLBACK_TOKEN>`, outside the OpenAPI contract) is confirmed by an STK query before one payment is inserted; duplicates are ignored. `refreshPaymentIntent` performs the same query on demand.
+- **Reports:** `src/reports/pdf.js` (PDFKit) renders A4 documents with logo (`GARAGE_LOGO_FILE` or a drawn logo), company name/contacts, title, filters, generation date/time (EAT), generated-by and page numbers. Report SQL is bounded (366 days, 5000 rows) and sort columns are allowlisted. Each export is audited.
+- **Audit:** successful mutations commit with their audit event; failed mutations, denials and failed logins are recorded afterwards with outcome FAILURE/DENIED.
 
 Keep the repository's `docs/openapi.yaml` available at runtime: request validation and Swagger UI read it using a path relative to the source files. Run `npm run client:generate` after contract changes to regenerate `docs/api-operations.json`. Deploy the server with its contract, and coordinate schema requirements with the database developer before running real workflows. Online checkout still requires a provider adapter with authenticated confirmations and reconciliation; no client request can settle online money.
 

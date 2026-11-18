@@ -8,6 +8,10 @@ import { assertSession, utcDate } from './sessions.js';
 import { authHandlers } from './auth-handlers.js';
 import { resourceHandlers } from './resources.js';
 import { workflowHandlers } from './workflows.js';
+import { paymentHandlers } from './payments.js';
+import { reportHandlers } from './reports.js';
+import { createCipher } from './mfa.js';
+import { createMailer } from '../services/mailer.js';
 import { HttpError } from '../errors.js';
 
 const canonical = (value) => JSON.stringify(value, (key, entry) => entry && !Array.isArray(entry) && typeof entry === 'object'
@@ -54,23 +58,30 @@ async function mutate(database, req, handler) {
   });
 }
 
-export function createApiRouter({ database, auth, workflows, logger = console, extraHandlers = {} }) {
+const PUBLIC_RATE_LIMITED = ['login', 'registerCustomer', 'requestPasswordReset', 'resetPassword'];
+
+export function createApiRouter({ database, auth = {}, workflows, logger = console, extraHandlers = {}, mpesa, mailer, company, appBaseUrl, dataEncryptionKey }) {
   const router = Router();
   const security = createSecurity(database, auth);
-  const handlers = { ...authHandlers(database, security), ...resourceHandlers(), ...workflowHandlers(workflows), ...extraHandlers };
+  const cipher = createCipher({ dataKey: dataEncryptionKey, jwtSecret: auth.secret });
+  const handlers = {
+    ...authHandlers(database, security, { cipher, mailer: mailer ?? createMailer({}, logger), appBaseUrl, issuer: company?.name, logger }),
+    ...resourceHandlers(), ...workflowHandlers(workflows), ...paymentHandlers({ database, mpesa, logger }),
+    ...reportHandlers({ company, logger }), ...extraHandlers,
+  };
   const limiter = rateLimit({
     windowMs: 15 * 60 * 1000, limit: 30, standardHeaders: 'draft-8', legacyHeaders: false,
     handler(req, res) { res.status(429).json({ code: 'RATE_LIMITED', message: 'Too many authentication attempts. Try again later.', request_id: req.requestId }); },
   });
   router.get('/', (req, res) => res.json({ name: contract.info.title, version: contract.info.version, docs: '/api/docs', contract: '/api/openapi.json', operations: operations.map((operation) => {
-    const requiresPaymentProvider = operation.operationId === 'createPaymentIntent';
-    return { operationId: operation.operationId, method: operation.method.toUpperCase(), path: `/api/v1${operation.path}`, implemented: Boolean(handlers[operation.operationId]) && !requiresPaymentProvider, requiresPaymentProvider };
+    const requiresPaymentProvider = ['createPaymentIntent', 'refreshPaymentIntent'].includes(operation.operationId);
+    return { operationId: operation.operationId, method: operation.method.toUpperCase(), path: `/api/v1${operation.path}`, implemented: Boolean(handlers[operation.operationId]) && (!requiresPaymentProvider || Boolean(mpesa?.configured)), requiresPaymentProvider };
   }) }));
   for (const operation of operations) {
     const path = operation.path.replace(/\{(\w+)\}/g, ':$1');
     const validate = validateRequest(operation);
     const authenticate = operation.security?.length === 0 ? false : true;
-    const middleware = ['login', 'registerCustomer'].includes(operation.operationId) ? [limiter] : [];
+    const middleware = PUBLIC_RATE_LIMITED.includes(operation.operationId) ? [limiter] : [];
     router[operation.method](path, ...middleware, async (req, res, next) => {
       req.operation = operation;
       try {
@@ -82,11 +93,15 @@ export function createApiRouter({ database, auth, workflows, logger = console, e
         const handler = handlers[operation.operationId];
         if (!handler) throw new HttpError(501, 'NOT_IMPLEMENTED', 'This workflow is not available yet. Check /api/v1 for implementation status.');
         const result = operation.method === 'get' ? await handler(req, createStore(database)) : await mutate(database, req, handler);
+        // Work that must not hold database locks (email, payment provider calls) runs after commit.
+        if (result.afterCommit) Object.assign(result, await result.afterCommit() ?? {});
         if (result.headers) res.set(result.headers);
+        if (result.raw) return res.status(result.status ?? 200).send(result.raw);
         if (result.status === 204) return res.status(204).end();
         return res.status(result.status ?? 200).json(result.body);
       } catch (error) {
-        if (['login', 'registerCustomer'].includes(operation.operationId) || [401, 403].includes(error.status)) {
+        // Failed logins, denials and every failed change are kept in the audit trail.
+        if (PUBLIC_RATE_LIMITED.includes(operation.operationId) || [401, 403].includes(error.status) || operation.method !== 'get') {
           try { await audit(createStore(database), req, error.status === 403 ? 'DENIED' : 'FAILURE'); }
           catch { logger.error({ event: 'audit_write_failed', request_id: req.requestId }); }
         }

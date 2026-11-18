@@ -371,4 +371,44 @@ CREATE TABLE IF NOT EXISTS idempotency_key (
     CONSTRAINT chk_idempotency_key_length CHECK (CHAR_LENGTH(`key`) >= 16)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- ============================================================================
+-- 17. USER_MFA (time-based one-time password second factor)
+--     One row per enrolled user. The shared TOTP secret is encrypted by the
+--     application (AES-256-GCM) before storage; the database never holds it
+--     in plain text. enabled stays 0 until the user proves a valid code.
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS user_mfa (
+    user_id           INT           NOT NULL,
+    secret_encrypted  VARCHAR(255)  NOT NULL,
+    enabled           TINYINT(1)    NOT NULL DEFAULT 0,
+    last_used_step    INT               NULL DEFAULT NULL,
+    created_at        DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at        DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_id),
+    CONSTRAINT fk_user_mfa_user
+        FOREIGN KEY (user_id) REFERENCES `user` (user_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ============================================================================
+-- 18. PASSWORD_RESET (forgot-password tokens)
+--     Only the SHA-256 hash of the emailed token is stored. Tokens are
+--     single-use (used_at) and short-lived (expires_at).
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS password_reset (
+    password_reset_id  INT       NOT NULL AUTO_INCREMENT,
+    user_id            INT       NOT NULL,
+    token_hash         CHAR(64)  NOT NULL,
+    expires_at         DATETIME  NOT NULL,
+    used_at            DATETIME      NULL DEFAULT NULL,
+    created_at         DATETIME  NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (password_reset_id),
+    UNIQUE KEY uq_password_reset_token_hash (token_hash),
+    INDEX idx_password_reset_user_id (user_id),
+    INDEX idx_password_reset_expires (expires_at),
+    CONSTRAINT fk_password_reset_user
+        FOREIGN KEY (user_id) REFERENCES `user` (user_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 SET FOREIGN_KEY_CHECKS = 1;

@@ -54,8 +54,11 @@ export function loadConfig(env = process.env) {
   }
   const sslEnabled = sslValue === 'true';
   const localHosts = ['localhost', '127.0.0.1', '[::1]'];
-  if (!sslEnabled && (nodeEnv === 'production' || !localHosts.includes(databaseUrl.hostname))) {
-    throw new Error('DB_SSL=false is allowed only for a local development/test database.');
+  // DB_TRUSTED_PRIVATE_NETWORK=true is an explicit opt-in for a database that is reachable only on an
+  // isolated container network (docker-compose.yml): the port is never published outside that network.
+  const privateNetwork = env.DB_TRUSTED_PRIVATE_NETWORK === 'true';
+  if (!sslEnabled && !privateNetwork && (nodeEnv === 'production' || !localHosts.includes(databaseUrl.hostname))) {
+    throw new Error('DB_SSL=false is allowed only for a local development/test database, or with DB_TRUSTED_PRIVATE_NETWORK=true on an isolated container network.');
   }
   let ca;
   const caFile = env.DB_SSL_CA_FILE?.trim();
@@ -96,8 +99,45 @@ export function loadConfig(env = process.env) {
     schedule = { open, close, days: [...new Set(daysText.split(',').map(Number))] };
   }
   if (env.LABOR_HOURLY_RATE && !/^(0|[1-9][0-9]{0,7})\.[0-9]{2}$/.test(env.LABOR_HOURLY_RATE)) throw new Error('LABOR_HOURLY_RATE must be a nonnegative DECIMAL(10,2) string.');
+  const optionalText = (value) => value?.trim() || undefined;
+  if (env.DATA_ENCRYPTION_KEY && Buffer.from(env.DATA_ENCRYPTION_KEY, 'base64url').length !== 32) {
+    throw new Error('DATA_ENCRYPTION_KEY must be 32 random bytes encoded as base64url.');
+  }
+  const appBaseUrl = env.APP_BASE_URL ?? corsOrigins[0] ?? 'http://localhost:5173';
+  try { new URL(appBaseUrl); } catch { throw new Error('APP_BASE_URL must be an absolute URL.'); }
+  const mpesaEnvironment = env.MPESA_ENV ?? 'sandbox';
+  if (!['sandbox', 'production'].includes(mpesaEnvironment)) throw new Error('MPESA_ENV must be sandbox or production.');
+  const mpesaKeys = ['MPESA_CONSUMER_KEY', 'MPESA_CONSUMER_SECRET', 'MPESA_SHORTCODE', 'MPESA_PASSKEY', 'MPESA_CALLBACK_BASE_URL', 'MPESA_CALLBACK_TOKEN'];
+  const mpesaSet = mpesaKeys.filter((key) => env[key]?.trim());
+  let mpesa;
+  if (mpesaSet.length) {
+    if (mpesaSet.length !== mpesaKeys.length) throw new Error(`Set all M-Pesa variables together: ${mpesaKeys.join(', ')}.`);
+    if (!/^[A-Za-z0-9_-]{32,}$/.test(env.MPESA_CALLBACK_TOKEN)) throw new Error('MPESA_CALLBACK_TOKEN must be at least 32 URL-safe random characters.');
+    let callbackBase;
+    try { callbackBase = new URL(env.MPESA_CALLBACK_BASE_URL); } catch { throw new Error('MPESA_CALLBACK_BASE_URL must be an absolute https URL.'); }
+    if (callbackBase.protocol !== 'https:') throw new Error('MPESA_CALLBACK_BASE_URL must use https; Safaricom only calls public https endpoints.');
+    mpesa = {
+      environment: mpesaEnvironment, consumerKey: env.MPESA_CONSUMER_KEY.trim(), consumerSecret: env.MPESA_CONSUMER_SECRET.trim(),
+      shortcode: env.MPESA_SHORTCODE.trim(), passkey: env.MPESA_PASSKEY.trim(), callbackToken: env.MPESA_CALLBACK_TOKEN.trim(),
+      transactionType: env.MPESA_TRANSACTION_TYPE === 'CustomerBuyGoodsOnline' ? 'CustomerBuyGoodsOnline' : 'CustomerPayBillOnline',
+      callbackUrl: `${callbackBase.origin}${callbackBase.pathname.replace(/\/$/, '')}/api/v1/payments/mpesa/callback/${env.MPESA_CALLBACK_TOKEN.trim()}`,
+    };
+  }
   return {
     nodeEnv,
+    appBaseUrl,
+    dataEncryptionKey: optionalText(env.DATA_ENCRYPTION_KEY),
+    company: {
+      name: optionalText(env.GARAGE_NAME) ?? 'Garage Management System',
+      address: optionalText(env.GARAGE_ADDRESS), phone: optionalText(env.GARAGE_PHONE), email: optionalText(env.GARAGE_EMAIL),
+      logoFile: optionalText(env.GARAGE_LOGO_FILE),
+    },
+    mail: {
+      nodeEnv, host: optionalText(env.SMTP_HOST), port: boundedInteger(env.SMTP_PORT, 587, 'SMTP_PORT', 1, 65535),
+      secure: env.SMTP_SECURE === 'true', user: optionalText(env.SMTP_USER), password: env.SMTP_PASSWORD,
+      from: optionalText(env.MAIL_FROM) ?? 'Garage Management System <no-reply@garage.local>',
+    },
+    mpesa,
     workflows: { schedule, laborRate: env.LABOR_HOURLY_RATE || undefined },
     auth: {
       secret: env.JWT_SECRET,
