@@ -25,9 +25,11 @@ build/
 # Frontend
 frontend/node_modules/
 
+
 # Database
 *.sql.bak
 
 **/certs/
 *.md
+!/client/FRONTEND_README.md
 *.pdf
