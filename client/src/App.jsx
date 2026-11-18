@@ -1,13 +1,13 @@
 import { BrowserRouter, Route, Routes } from "react-router-dom";
-import { StoreProvider } from "./lib/store";
-import { PortalLayout } from "./layouts/Layout";
+import { AuthProvider } from "./lib/auth";
+import { PortalLayout } from "./layouts/PortalLayout";
 import { Login, Register, Welcome } from "./pages/Public";
 import { BookAppointment, CustomerDashboard, ManageVehicles, ServiceHistory } from "./pages/Customer";
 import { AdminAppointments, AdminCustomers, AdminDashboard, AdminServices } from "./pages/Admin";
 
 export default function App() {
   return (
-    <StoreProvider>
+    <AuthProvider>
       <BrowserRouter>
         <Routes>
           <Route path="/" element={<Welcome />} />
@@ -30,6 +30,6 @@ export default function App() {
           </Route>
         </Routes>
       </BrowserRouter>
-    </StoreProvider>
+    </AuthProvider>
   );
 }
