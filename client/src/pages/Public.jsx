@@ -40,6 +40,7 @@ export function Login({ role }) {
       {error && <p className="error">{error}</p>}
       <button className="btn block" disabled={busy}>{busy ? "Logging in…" : "Login"}</button>
       {role === "customer" && <p>Don't have an account? <Link to="/register">Register here</Link></p>}
+      <Link className="btn secondary block" to="/">← Back to portal selection</Link>
     </form>
   );
 }
@@ -74,6 +75,7 @@ export function Register() {
       <input required type="password" placeholder="Confirm Password" value={f.confirm} onChange={set("confirm")} />
       {error && <p className="error">{error}</p>}
       <button className="btn block" disabled={busy}>{busy ? "Creating account…" : "Complete Registration"}</button>
+      <Link className="btn secondary block" to="/">← Back to portal selection</Link>
     </form>
   );
 }
