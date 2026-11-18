@@ -4,18 +4,30 @@ MySQL 8.0.16+ schema for the Garage Management System. All tables use InnoDB wit
 
 ## Quick start
 
+Run these from the repository root. PowerShell does not support `<` input redirection, so the commands use MySQL's `source` instead:
+
 ```powershell
 # 1. Create the database (run as MySQL root)
 mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS garage_management_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 
 # 2. Apply the schema
-mysql -u root -p garage_management_db < backend/database/schema.sql
+mysql -u root -p garage_management_db -e "source backend/database/schema.sql"
 
 # 3. Load seed data (development only)
-mysql -u root -p garage_management_db < backend/database/seed.sql
+mysql -u root -p garage_management_db -e "source backend/database/seed.sql"
 ```
 
-Change `root` to your username and add `-P {your-port number}` after `-p` if your MySQL server is on a different port
+In Git Bash or cmd, `mysql -u root -p garage_management_db < backend/database/seed.sql` also works.
+
+Change `root` to your username and add `-P {your-port number}` after `-p` if your MySQL server is on a different port (and `-h {host}` if it is not local).
+
+### Re-seeding an existing database
+
+`seed.sql` inserts rows with fixed IDs and does not delete existing data, so running it again on a populated database fails with duplicate-key errors. To start fresh, drop and recreate the database (**this deletes all data in it**), then repeat steps 2 and 3:
+
+```powershell
+mysql -u root -p -e "DROP DATABASE garage_management_db; CREATE DATABASE garage_management_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+```
 
 > [!IMPORTANT]
 > Create a dedicated least-privilege application user for the Express server before running the app. Do not use `root` in the `DATABASE_URL` environment variable.
@@ -87,17 +99,39 @@ user      1──M  audit_event   (as actor)
 
 ## Seed data credentials
 
-All seeded user accounts use the password **`Password123!`** (bcrypt hash). Replace the hash if your server uses Argon2id or a different algorithm.
+All seeded user accounts use the password **`Password123!`**.
 
-| Email                        | Role         |
-| ---------------------------- | ------------ |
-| `james.mwangi@example.com`   | Customer     |
-| `aisha.odhiambo@example.com` | Customer     |
-| `peter.kamau@example.com`    | Customer     |
-| `sarah.njeri@garage.local`   | Admin        |
-| `john.kipchoge@garage.local` | Receptionist |
-| `david.maina@garage.local`   | Mechanic     |
-| `michael.ouma@garage.local`  | Mechanic     |
+| Email                        | Role         | Client portal                     |
+| ---------------------------- | ------------ | --------------------------------- |
+| `james.mwangi@example.com`   | Customer     | Customer portal                   |
+| `aisha.odhiambo@example.com` | Customer     | Customer portal                   |
+| `peter.kamau@example.com`    | Customer     | Customer portal                   |
+| `sarah.njeri@garage.local`   | Admin        | Admin portal                      |
+| `john.kipchoge@garage.local` | Receptionist | Admin portal (some actions are admin-only) |
+| `david.maina@garage.local`   | Mechanic     | None yet (API only)               |
+| `michael.ouma@garage.local`  | Mechanic     | None yet (API only)               |
+
+### Password hash format
+
+The server only accepts scrypt hashes in the format produced by `hashPassword()` in `backend/server/src/api/security.js`:
+
+```
+scrypt$32768$8$1$<32 hex salt>$<128 hex hash>
+```
+
+bcrypt (`$2b$...`) and Argon2id hashes are **not** accepted: logins against them fail with 401. To generate a new hash, run this from `backend/server`:
+
+```powershell
+node --input-type=module -e "import { hashPassword } from './src/api/security.js'; console.log(await hashPassword('Password123!'))"
+```
+
+Each run produces a different hash because the salt is random; any of them verifies. To fix the passwords on an already-seeded database without re-seeding, update the rows directly (for example in MySQL Workbench):
+
+```sql
+UPDATE `user` SET password_hash = '<hash from the command above>' WHERE user_id BETWEEN 1 AND 7;
+```
+
+Login also needs `JWT_SECRET` set in `backend/server/.env.local`; see the [server README](../server/README.md#troubleshooting).
 # Official database schema
 
 [schema.sql](schema.sql) is the database developer's supplied MySQL 8.0.16+ / InnoDB schema, preserved unchanged as the integration reference. The database developer owns provisioning, migrations and seed data. The server never executes this file or creates tables at startup.

@@ -7,7 +7,8 @@
 --   mysql -u garage_user -p garage_management_db < seed.sql
 --
 -- Password for ALL seeded users: Password123!
--- Hash below is bcrypt ($2b$) for "Password123!" — replace if using Argon2id.
+-- Hash below is scrypt (N=32768, r=8, p=1) for "Password123!", in the format produced by
+-- hashPassword() in backend/server/src/api/security.js. Regenerate with that function if changed.
 -- ============================================================================
 
 SET NAMES utf8mb4;
@@ -34,18 +35,18 @@ INSERT INTO customer (customer_id, name, phone, email) VALUES
 
 -- ============================================================================
 -- USERS (login accounts)
--- bcrypt hash for "Password123!" — $2b$12$LJ3m4ys4Lz.qlPqGq1HkKeFg5vN3wXjKp0Zx1QOmYdW5bCsVnGKWe
+-- scrypt hash for "Password123!" (see header note)
 -- ============================================================================
 INSERT INTO `user` (user_id, customer_id, name, email, password_hash, role, active) VALUES
 -- Customers (linked to customer profiles)
-(1,  1, 'James Mwangi',     'james.mwangi@example.com',   '$2b$12$LJ3m4ys4Lz.qlPqGq1HkKeFg5vN3wXjKp0Zx1QOmYdW5bCsVnGKWe', 'CUSTOMER',     1),
-(2,  2, 'Aisha Odhiambo',   'aisha.odhiambo@example.com', '$2b$12$LJ3m4ys4Lz.qlPqGq1HkKeFg5vN3wXjKp0Zx1QOmYdW5bCsVnGKWe', 'CUSTOMER',     1),
-(3,  3, 'Peter Kamau',      'peter.kamau@example.com',    '$2b$12$LJ3m4ys4Lz.qlPqGq1HkKeFg5vN3wXjKp0Zx1QOmYdW5bCsVnGKWe', 'CUSTOMER',     1),
+(1,  1, 'James Mwangi',     'james.mwangi@example.com',   'scrypt$32768$8$1$9dfb4cb9d55f3fa583d7766efb182212$fc5a893c1fe0c6bc105763989ef45cb1260f44e9f3970f15aa42cf863368eda7c25769e5f12619499bf113c7f4090e74fa4c9db36b3ace4e8ee170f9639e7aff', 'CUSTOMER',     1),
+(2,  2, 'Aisha Odhiambo',   'aisha.odhiambo@example.com', 'scrypt$32768$8$1$9dfb4cb9d55f3fa583d7766efb182212$fc5a893c1fe0c6bc105763989ef45cb1260f44e9f3970f15aa42cf863368eda7c25769e5f12619499bf113c7f4090e74fa4c9db36b3ace4e8ee170f9639e7aff', 'CUSTOMER',     1),
+(3,  3, 'Peter Kamau',      'peter.kamau@example.com',    'scrypt$32768$8$1$9dfb4cb9d55f3fa583d7766efb182212$fc5a893c1fe0c6bc105763989ef45cb1260f44e9f3970f15aa42cf863368eda7c25769e5f12619499bf113c7f4090e74fa4c9db36b3ace4e8ee170f9639e7aff', 'CUSTOMER',     1),
 -- Staff (customer_id is NULL)
-(4, NULL, 'Sarah Njeri',    'sarah.njeri@garage.local',    '$2b$12$LJ3m4ys4Lz.qlPqGq1HkKeFg5vN3wXjKp0Zx1QOmYdW5bCsVnGKWe', 'ADMIN',        1),
-(5, NULL, 'John Kipchoge',  'john.kipchoge@garage.local',  '$2b$12$LJ3m4ys4Lz.qlPqGq1HkKeFg5vN3wXjKp0Zx1QOmYdW5bCsVnGKWe', 'RECEPTIONIST', 1),
-(6, NULL, 'David Maina',    'david.maina@garage.local',    '$2b$12$LJ3m4ys4Lz.qlPqGq1HkKeFg5vN3wXjKp0Zx1QOmYdW5bCsVnGKWe', 'MECHANIC',     1),
-(7, NULL, 'Michael Ouma',   'michael.ouma@garage.local',   '$2b$12$LJ3m4ys4Lz.qlPqGq1HkKeFg5vN3wXjKp0Zx1QOmYdW5bCsVnGKWe', 'MECHANIC',     1);
+(4, NULL, 'Sarah Njeri',    'sarah.njeri@garage.local',    'scrypt$32768$8$1$9dfb4cb9d55f3fa583d7766efb182212$fc5a893c1fe0c6bc105763989ef45cb1260f44e9f3970f15aa42cf863368eda7c25769e5f12619499bf113c7f4090e74fa4c9db36b3ace4e8ee170f9639e7aff', 'ADMIN',        1),
+(5, NULL, 'John Kipchoge',  'john.kipchoge@garage.local',  'scrypt$32768$8$1$9dfb4cb9d55f3fa583d7766efb182212$fc5a893c1fe0c6bc105763989ef45cb1260f44e9f3970f15aa42cf863368eda7c25769e5f12619499bf113c7f4090e74fa4c9db36b3ace4e8ee170f9639e7aff', 'RECEPTIONIST', 1),
+(6, NULL, 'David Maina',    'david.maina@garage.local',    'scrypt$32768$8$1$9dfb4cb9d55f3fa583d7766efb182212$fc5a893c1fe0c6bc105763989ef45cb1260f44e9f3970f15aa42cf863368eda7c25769e5f12619499bf113c7f4090e74fa4c9db36b3ace4e8ee170f9639e7aff', 'MECHANIC',     1),
+(7, NULL, 'Michael Ouma',   'michael.ouma@garage.local',   'scrypt$32768$8$1$9dfb4cb9d55f3fa583d7766efb182212$fc5a893c1fe0c6bc105763989ef45cb1260f44e9f3970f15aa42cf863368eda7c25769e5f12619499bf113c7f4090e74fa4c9db36b3ace4e8ee170f9639e7aff', 'MECHANIC',     1);
 
 -- ============================================================================
 -- VEHICLES

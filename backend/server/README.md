@@ -62,6 +62,19 @@ The default listener is `http://127.0.0.1:8000`; business routes live under `/ap
 | `GET /api/openapi.json` | Machine-readable OpenAPI contract |
 | `/api/docs` | Interactive Swagger UI |
 
+## Roles and access
+
+Every protected route checks the caller's role against the operation's `x-roles` list in `docs/openapi.yaml` and returns `403 FORBIDDEN` otherwise (`src/api/router.js`). Roles are re-read from the database on each request, so role or activation changes take effect immediately.
+
+| Role | Access |
+| --- | --- |
+| `CUSTOMER` | Own customer profile, vehicles, bookings, job cards, invoices and payments only. Other customers' records return 404. Read-only parts and service-task catalogues. |
+| `RECEPTIONIST` | All customers, vehicles, bookings, job cards, invoices and payment recording. Cannot manage users, parts or service tasks, or read audit events. |
+| `MECHANIC` | Only job cards assigned to them: status, tasks and part usage. Cannot cancel or close jobs. |
+| `ADMIN` | Everything, including users, parts, service tasks and audit events. |
+
+The client's portal checks (`client/src/lib/auth.jsx`) only control navigation; the server is what enforces access.
+
 Health probes are infrastructure endpoints outside the business OpenAPI contract. They do not check that application tables have been migrated. The server verifies database connectivity before listening. No migrations or remote writes run automatically. SIGINT/SIGTERM stop accepting traffic, drain active requests, and close the database pool; shutdown is bounded to 10 seconds.
 
 ## Database interface and SQL portability
@@ -83,3 +96,13 @@ Connections have a 5-second establishment timeout and queries a 6-second client 
 The official schema uses lowercase names (including singular `job_part`), `invoice_line_id`, and DATETIME(0). Booking writes require whole seconds; MySQL session timestamps are UTC. MySQL transactions explicitly use SERIALIZABLE. MySQL must lock the relevant bay/vehicle rows in a consistent order and recheck overlap inside the reservation transaction. Verify those invariants under concurrency against the provisioned database before enabling workflows. The current test suite checks schema identifiers, HTTP workflows and boundary rules; it does not establish real-engine SQL or concurrent booking guarantees.
 
 Keep the repository's `docs/openapi.yaml` available at runtime: request validation and Swagger UI read it using a path relative to the source files. Run `npm run client:generate` after contract changes to regenerate `docs/api-operations.json`. Deploy the server with its contract, and coordinate schema requirements with the database developer before running real workflows. Online checkout still requires a provider adapter with authenticated confirmations and reconciliation; no client request can settle online money.
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
+| --- | --- |
+| Login returns `503 AUTH_NOT_CONFIGURED` ("Authentication is not configured on this server.") | `JWT_SECRET` in `.env.local` is empty. In development the server still starts, but every auth route returns 503. Generate a secret with the command in [Local setup](#local-setup), set `JWT_SECRET=<value>`, and restart the server (`npm run dev` watches source files, not `.env.local`). |
+| Server exits with `JWT_SECRET must contain at least 32 bytes.` | The secret is too short. Use the generator command, which produces 64 characters. |
+| Login with a seeded account returns 401 | The stored password hash is not in the server's scrypt format (for example an old bcrypt hash). See [Password hash format](../database/README.md#password-hash-format). |
+| Login returns 429 | Auth routes allow 30 attempts per IP per 15 minutes. Wait, or restart the server in development to reset the in-memory limiter. |
+| A logged-in user gets 403 `FORBIDDEN` | Their role is not allowed on that operation; see [Roles and access](#roles-and-access). |
