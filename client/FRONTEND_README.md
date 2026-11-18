@@ -35,8 +35,10 @@ All seeded accounts use the password `Password123!`.
 
 | Portal | Login page | Allowed roles | Seeded account |
 |---|---|---|---|
-| Customer | `/customer-login` | `CUSTOMER` | `james.mwangi@example.com` |
-| Admin | `/admin-login` | `ADMIN`, `RECEPTIONIST` | `sarah.njeri@garage.local` (admin), `john.kipchoge@garage.local` (receptionist) |
+| Customer | `/customer-login` | `CUSTOMER` | `james.mwangi@example.com` (3 vehicles, history, upcoming appointments) |
+| Admin | `/admin-login` | `ADMIN`, `RECEPTIONIST` | `sarah.njeri@garage.local` or `esther.achieng@garage.local` (admin), `john.kipchoge@garage.local` (receptionist) |
+
+The [database README](../backend/database/README.md#seed-data-credentials) lists every seeded account and what each one is useful for demoing.
 
 New customers can create an account at `/register` and are logged in straight away.
 

@@ -101,15 +101,40 @@ user      1──M  audit_event   (as actor)
 
 All seeded user accounts use the password **`Password123!`**.
 
-| Email                        | Role         | Client portal                     |
-| ---------------------------- | ------------ | --------------------------------- |
-| `james.mwangi@example.com`   | Customer     | Customer portal                   |
-| `aisha.odhiambo@example.com` | Customer     | Customer portal                   |
-| `peter.kamau@example.com`    | Customer     | Customer portal                   |
-| `sarah.njeri@garage.local`   | Admin        | Admin portal                      |
-| `john.kipchoge@garage.local` | Receptionist | Admin portal (some actions are admin-only) |
-| `david.maina@garage.local`   | Mechanic     | None yet (API only)               |
-| `michael.ouma@garage.local`  | Mechanic     | None yet (API only)               |
+| Email                          | Role         | Client portal                              | Good for demoing |
+| ------------------------------ | ------------ | ------------------------------------------ | ---------------- |
+| `james.mwangi@example.com`     | Customer     | Customer portal                            | 3 vehicles, paid history, car in the garage today, 2 upcoming appointments |
+| `aisha.odhiambo@example.com`   | Customer     | Customer portal                            | 2 vehicles, one paid and one **unpaid** invoice, upcoming appointment |
+| `mary.akinyi@example.com`      | Customer     | Customer portal                            | 2 vehicles, **partly paid** invoice (KES 8,000 due), upcoming appointment |
+| `joseph.mutua@example.com`     | Customer     | Customer portal                            | Small fleet (3 vehicles), unpaid invoice, upcoming fleet service |
+| `peter.kamau@example.com`      | Customer     | Customer portal                            | 1 vehicle, appointment later today |
+| `grace.wanjiku@example.com`    | Customer     | Customer portal                            | Paid history, upcoming appointment |
+| `kevin.ochieng@example.com`    | Customer     | Customer portal                            | A no-show, then rebooked |
+| `naliaka.wekesa@example.com`   | Customer     | Customer portal                            | A cancelled booking and an upcoming one |
+| `wanjiru.kariuki@example.com`  | Customer     | Customer portal                            | Brand-new customer: one pending booking, no history |
+| `sarah.njeri@garage.local`     | Admin        | Admin portal                               | |
+| `esther.achieng@garage.local`  | Admin        | Admin portal                               | |
+| `john.kipchoge@garage.local`   | Receptionist | Admin portal (some actions are admin-only) | |
+| `faith.muthoni@garage.local`   | Receptionist | Admin portal (some actions are admin-only) | |
+| `david.maina@garage.local`     | Mechanic     | None yet (API only)                        | Job awaiting parts |
+| `michael.ouma@garage.local`    | Mechanic     | None yet (API only)                        | Job in progress today |
+| `brian.kiprotich@garage.local` | Mechanic     | None yet (API only)                        | Job opened today, not started |
+| `samuel.njoroge@garage.local`  | Mechanic     | **Cannot log in** (deactivated)            | Former staff; still appears on old job cards |
+
+Customers Daniel Otieno, Lucy Chebet and Ahmed Hassan have no login. They are walk-in customers that reception manages.
+
+### What the seed data covers
+
+**Dates are relative to the day you load `seed.sql`**, so there is always a history, work in the garage today, and upcoming appointments. Past visits go back about four months and appointments run about three weeks ahead. All appointments fall within opening hours (08:00–17:00 Nairobi, Monday–Saturday), and any date that would land on a Sunday moves to the nearest open day. Re-seed to move the dates forward again.
+
+- **Appointments (24):** completed visits, a no-show, a customer cancellation, two vehicles checked in today, a confirmed appointment later today, and ten upcoming pending or confirmed bookings across four bays. Bay 5 is disabled, so it is never offered.
+- **Job cards (18):** 11 closed (paid), 3 completed with money still owed, 1 cancelled walk-in, 1 awaiting parts, 1 in progress, and 1 just opened.
+- **Invoices and payments:** 14 invoices paid by M-Pesa, card, bank transfer and cash, including part payments. Labour is charged at `LABOR_HOURLY_RATE` = 1000.00, the same way the server calculates it.
+- **Things for an admin to fix:**
+  - The *Clutch Kit* part has no price, and job card 16 is waiting on it.
+  - The *Pre-Purchase Inspection* service has no standard hours.
+  - Engine oil went up from 3,300 to 3,500. Older invoices keep the old price because prices are snapshotted when used.
+- **Audit trail:** staff creation, a staff deactivation, a failed login, a customer denied access to a staff route, payments and status changes. Actions use the same operation names the server writes.
 
 ### Password hash format
 
@@ -128,7 +153,7 @@ node --input-type=module -e "import { hashPassword } from './src/api/security.js
 Each run produces a different hash because the salt is random; any of them verifies. To fix the passwords on an already-seeded database without re-seeding, update the rows directly (for example in MySQL Workbench):
 
 ```sql
-UPDATE `user` SET password_hash = '<hash from the command above>' WHERE user_id BETWEEN 1 AND 7;
+UPDATE `user` SET password_hash = '<hash from the command above>' WHERE user_id BETWEEN 1 AND 17;
 ```
 
 Login also needs `JWT_SECRET` set in `backend/server/.env.local`; see the [server README](../server/README.md#troubleshooting).
