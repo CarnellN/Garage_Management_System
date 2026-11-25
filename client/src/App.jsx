@@ -4,16 +4,19 @@ import { PortalLayout } from "./layouts/PortalLayout";
 import { Login, Register, Welcome } from "./pages/Public";
 import { BookAppointment, CustomerDashboard, ManageVehicles, ServiceHistory } from "./pages/Customer";
 import { AdminAppointments, AdminCustomers, AdminDashboard, AdminServices } from "./pages/Admin";
+import PublicLayout from "./layouts/PublicLayout";
 
 export default function App() {
   return (
     <AuthProvider>
       <BrowserRouter>
         <Routes>
-          <Route path="/" element={<Welcome />} />
-          <Route path="/customer-login" element={<Login role="customer" />} />
-          <Route path="/admin-login" element={<Login role="admin" />} />
-          <Route path="/register" element={<Register />} />
+          <Route element={<PublicLayout />}>
+            <Route path="/" element={<Welcome />} />
+            <Route path="/customer-login" element={<Login role="customer" />} />
+            <Route path="/admin-login" element={<Login role="admin" />} />
+            <Route path="/register" element={<Register />} />
+          </Route>
 
           <Route path="/customer" element={<PortalLayout role="customer" />}>
             <Route index element={<CustomerDashboard />} />

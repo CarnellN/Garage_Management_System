@@ -5,7 +5,6 @@ body { margin:0; font-family: system-ui, sans-serif; color:var(--ink); backgroun
 h2 { margin:0 0 16px; } h3 { margin:0 0 14px; }
 
 /* Public pages: centred card */
-#root > .center-box { margin:8vh auto; }
 .center-box { max-width:460px; background:#fff; padding:32px; border-radius:10px; text-align:center; }
 .center-box .left { text-align:left; }
 
@@ -45,3 +44,22 @@ th { background:#eee; }
 .error { color:var(--red); }
 a { color:var(--blue); }
 .btn:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline:3px solid #99c8ff; outline-offset:2px; }
+
+/* Background picture for the public pages */
+.public-bg {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background-color: #1f2937;
+  background-image: linear-gradient(rgba(0, 0, 0, .45), rgba(0, 0, 0, .45)), url("/login-bg.jpg");
+  background-position: center;
+  background-size: cover;
+  background-repeat: no-repeat;
+}
+.public-bg .center-box {
+  width: 100%;
+  margin: 0;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .35);
+}
